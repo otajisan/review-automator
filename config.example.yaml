@@ -1,0 +1,62 @@
+# review-automator configuration.
+# Copy to ~/.config/review-automator/config.yaml (or set REVIEW_AUTOMATOR_CONFIG) and edit.
+# Slack tokens do NOT go here; put them in ~/.config/review-automator/.env (see .env.example).
+
+owner:
+  # Your Slack member ID (profile → ⋮ → "Copy member ID"). You are notified, and only you can press the buttons.
+  slack_user_id: U0123456789
+  # Your GitHub login. Reviews are posted with the `gh` CLI as this account; your own PRs are never approved.
+  github_login: your-github-login
+
+slack:
+  # Channel IDs (channel details → bottom of the "About" tab). The bot must be invited to each.
+  watch_channels: [C0123456789]
+  # Where review summaries and buttons are posted. A private channel just for you works well.
+  notify_channel: C0987654321
+  # Who may trigger a review by posting a link. Empty = anyone in the watched channels.
+  # Restrict this if outsiders (e.g. Slack Connect guests) can post there.
+  allowed_requesters: []
+
+github:
+  # Only PRs in these repositories are reviewed. Globs over owner/repo, case-insensitive.
+  allowed_repos:
+    - your-org/*
+
+# workspace:
+#   dir: ~/Library/Application Support/review-automator/workspace   # clones and per-review worktrees
+#   keep_worktree_on_failure: true
+
+review:
+  language: ja # language of the review comments
+  model: sonnet
+  max_turns: 80
+  max_budget_usd: 3 # per review, including subagents
+  timeout_minutes: 20
+  concurrency: 1
+  # The skill that drives a review, and the agents it runs. Defaults are bundled in ./plugin.
+  # Replace with the names of your own skills/agents in ~/.claude to review "your way".
+  skill: review-automator:pr-review
+  reviewers: [review-automator:correctness-reviewer, review-automator:security-reviewer]
+  verifier: review-automator:finding-verifier
+  # Extra environment for the review session. Use it to switch off personal Claude Code hooks
+  # that expect an interactive user, e.g.:
+  # env: { ECC_GATEGUARD: "off" }
+  env: {}
+  # Per-repository additions. Keys are owner/repo.
+  # per_repo:
+  #   your-org/your-repo:
+  #     extra_skills: [your-review-kb]     # skills in ~/.claude/skills to run as part of the review
+  #     allowed_tools:                     # read-only commands those skills need (sessions never prompt)
+  #       - "Bash(python3 ~/.claude/skills/your-review-kb/scripts/match.py *)"
+  #     extra_instructions: "Payments code must be reviewed for idempotency."
+
+post:
+  approve_body: "LGTM!! :+1:\n確認したほうが良さそうな箇所のみコメントしました！ご確認くださいませ。"
+  approve_body_no_findings: 'LGTM!! :+1:'
+  comment_body_no_findings: '確認しました。コメントは特にありません。' # when not approving and there is nothing to comment
+  comment_body: '確認したほうが良さそうな箇所にコメントしました！ご確認くださいませ。'
+  severity_on_findings: COMMENT # or REQUEST_CHANGES, used when a must-fix issue is found
+
+
+# state_dir: ~/Library/Application Support/review-automator
+# log_level: info

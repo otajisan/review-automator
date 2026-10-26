@@ -1,0 +1,5 @@
+{
+  "name": "review-automator",
+  "version": "0.1.0",
+  "description": "Read-only pull request review skill and reviewer agents used by review-automator."
+}
