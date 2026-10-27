@@ -90,6 +90,7 @@ export function tokenize(command: string, opts: { strict?: boolean } = {}): stri
   let current = '';
   let quote: '"' | "'" | null = null;
   let inToken = false;
+  let escaped = false; // previous char was a backslash inside double quotes
   for (const ch of command) {
     if (quote === "'") {
       if (ch === "'") quote = null;
@@ -97,8 +98,14 @@ export function tokenize(command: string, opts: { strict?: boolean } = {}): stri
       continue;
     }
     if (quote === '"') {
-      if (ch === '"') quote = null;
-      else if (ch === '$' || ch === '\\') return null;
+      // POSIX: inside double quotes a backslash only escapes $ ` " \; elsewhere (`\b`, `\|` in a
+      // regex) it is a literal backslash. Either way nothing is expanded or executed.
+      if (escaped) {
+        current += '$`"\\'.includes(ch) ? ch : `\\${ch}`;
+        escaped = false;
+      } else if (ch === '\\') escaped = true;
+      else if (ch === '"') quote = null;
+      else if (ch === '$') return null;
       else current += ch;
       continue;
     }

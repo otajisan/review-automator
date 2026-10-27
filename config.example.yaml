@@ -40,9 +40,11 @@ review:
   skill: review-automator:pr-review
   reviewers: [review-automator:correctness-reviewer, review-automator:security-reviewer]
   verifier: review-automator:finding-verifier
-  # Extra environment for the review session. Use it to switch off personal Claude Code hooks
-  # that expect an interactive user, e.g.:
-  # env: { ECC_GATEGUARD: "off" }
+  # Hooks from ~/.claude settings and plugins are turned off in the review session: they would run
+  # with the untrusted PR checkout as cwd, and hooks written for interactive use get in the way.
+  # The built-in tool guard is not affected.
+  disable_user_hooks: true
+  # Extra environment for the review session (rarely needed).
   env: {}
   # Per-repository additions. Keys are owner/repo.
   # per_repo:

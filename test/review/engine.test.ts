@@ -7,6 +7,7 @@ import {
   DENIED_TOOLS,
   missingCapabilities,
   runEngine,
+  sessionDataDir,
   type QueryFn,
 } from '../../src/review/engine.js';
 import { finding, silentLogger, testConfig } from '../helpers/fixtures.js';
@@ -81,6 +82,62 @@ describe('buildOptions', () => {
     const opts = buildOptions(input, new AbortController());
 
     expect(opts.allowedTools?.filter((t) => (DENIED_TOOLS as readonly string[]).includes(t))).toEqual([]);
+  });
+});
+
+describe('user hooks', () => {
+  it('turns off hooks from user settings by default, keeping the guard', () => {
+    const opts = buildOptions(input, new AbortController());
+
+    expect(opts.settings).toEqual({ disableAllHooks: true });
+    expect(opts.hooks?.PreToolUse).toHaveLength(1);
+  });
+
+  it('leaves user hooks alone when disable_user_hooks is off', () => {
+    const opts = buildOptions(
+      { ...input, review: { ...review, disable_user_hooks: false } },
+      new AbortController(),
+    );
+
+    expect(opts.settings).toBeUndefined();
+  });
+});
+
+describe('sessionDataDir', () => {
+  it('matches how Claude Code names the per-cwd project directory', () => {
+    expect(
+      sessionDataDir(
+        '/Users/me',
+        '/Users/me/Library/Application Support/ra/workspace/worktrees/20261027-2f1f7f4b1142',
+        undefined,
+      ),
+    ).toBe(
+      '/Users/me/.claude/projects/-Users-me-Library-Application-Support-ra-workspace-worktrees-20261027-2f1f7f4b1142',
+    );
+  });
+
+  it("lets the session read its own offloaded tool output, but not another session's", async () => {
+    const opts = buildOptions({ ...input, home: '/home/x' }, new AbortController());
+    const hook = opts.hooks?.PreToolUse?.[0]?.hooks[0];
+    const read = (file_path: string) =>
+      hook?.(
+        {
+          hook_event_name: 'PreToolUse',
+          tool_name: 'Read',
+          tool_input: { file_path },
+          tool_use_id: 't',
+        } as never,
+        't',
+        {
+          signal: new AbortController().signal,
+        },
+      );
+    const own = `${sessionDataDir('/home/x', '/w')}/0f9a/tool-results/b0sm30mzt.txt`;
+
+    expect(await read(own)).toEqual({});
+    expect(await read('/home/x/.claude/projects/-other-session/0f9a/tool-results/x.txt')).toMatchObject({
+      hookSpecificOutput: { permissionDecision: 'deny' },
+    });
   });
 });
 

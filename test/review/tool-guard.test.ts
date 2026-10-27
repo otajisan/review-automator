@@ -45,6 +45,9 @@ describe('Bash', () => {
     'git diff --text HEAD~1',
     `git log -- ${path.join(checkout, 'src', 'a.ts')}`,
     "git log --format='%H %s'",
+    // Regex escapes inside double quotes, as reviewers write them (seen denied in real reviews):
+    'git grep -n -E "class (ReportRow|ReportDto)\\b" -- src',
+    'git grep -n "foo\\|bar" -- src/a.ts',
   ])('allows %s', (command) => {
     expect(bash(command)).toBe(true);
   });
@@ -72,6 +75,7 @@ describe('Bash', () => {
     ['gh', 'gh api repos/o/r/pulls/1/reviews -f event=APPROVE'],
     ['unbalanced quotes', "git log 'oops"],
     ['variable expansion inside double quotes', 'git log "$HOME"'],
+    ['substitution hidden behind an escaped dollar', 'git log "\\$(id)"'],
     ['substitution inside double quotes', 'git log "$(id)"'],
     ['an abbreviated --output', 'git show HEAD --outp=/Users/me/.zshenv'],
     ['an abbreviated --open-files-in-pager', 'git grep --open-files=cat x'],
@@ -210,6 +214,11 @@ describe('toolGuardHook', () => {
 });
 
 describe('helpers', () => {
+  it('tokenize applies POSIX backslash rules inside double quotes', () => {
+    expect(tokenize('git grep "a\\"b" "c\\d" "e\\\\f"')).toEqual(['git', 'grep', 'a"b', 'c\\d', 'e\\f']);
+    expect(tokenize('git grep "unterminated\\"')).toBeNull();
+  });
+
   it('tokenize honours quotes', () => {
     expect(tokenize(`git grep -n "a b" 'c d'`)).toEqual(['git', 'grep', '-n', 'a b', 'c d']);
     expect(tokenize('git "x')).toBeNull();

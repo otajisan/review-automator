@@ -108,15 +108,15 @@ judgement** (must-fix the verifier could not settle — shown in Slack only), **
 
 See [`config.example.yaml`](config.example.yaml) for every option. The ones you will most likely touch:
 
-| Key                                                   | Purpose                                                                              |
-| ----------------------------------------------------- | ------------------------------------------------------------------------------------ |
-| `review.language`                                     | Language of the review comments (`ja`, `en`, …)                                      |
-| `review.skill`, `review.reviewers`, `review.verifier` | Which skill drives the review and which agents it runs                               |
-| `review.per_repo.<owner/repo>.extra_skills`           | Extra skills from `~/.claude/skills` to run for that repository                      |
-| `review.per_repo.<owner/repo>.allowed_tools`          | Read-only commands those skills need (the session never prompts)                     |
-| `review.env`                                          | Extra environment for the review session (e.g. to switch off interactive-only hooks) |
-| `review.max_budget_usd`, `review.timeout_minutes`     | Per-review limits                                                                    |
-| `post.*`                                              | Review bodies and the event used when a must-fix issue is found                      |
+| Key                                                   | Purpose                                                          |
+| ----------------------------------------------------- | ---------------------------------------------------------------- |
+| `review.language`                                     | Language of the review comments (`ja`, `en`, …)                  |
+| `review.skill`, `review.reviewers`, `review.verifier` | Which skill drives the review and which agents it runs           |
+| `review.per_repo.<owner/repo>.extra_skills`           | Extra skills from `~/.claude/skills` to run for that repository  |
+| `review.per_repo.<owner/repo>.allowed_tools`          | Read-only commands those skills need (the session never prompts) |
+| `review.env`                                          | Extra environment for the review session (rarely needed)         |
+| `review.max_budget_usd`, `review.timeout_minutes`     | Per-review limits                                                |
+| `post.*`                                              | Review bodies and the event used when a must-fix issue is found  |
 
 ### Using your own skills and agents
 
@@ -132,8 +132,8 @@ Because the session runs unattended, anything the guard does not allow is denied
 `Bash(python3 ~/.claude/skills/my-kb/match.py *)` to `per_repo.allowed_tools` if one of your skills
 needs a command. Pipes, `&&` and redirection stay forbidden even for listed commands.
 
-If a personal hook expects an interactive user (for example one that blocks the first Bash call until
-you answer), it will block the review too. Disable it for this session through `review.env`.
+Your personal hooks do not run in the review session (see `review.disable_user_hooks`), so hooks
+written for interactive use cannot block or slow down an unattended review.
 
 ## Security model
 
@@ -155,9 +155,11 @@ can do.
 - **Only the configured agents and skills.** The session may launch only `review.reviewers`,
   `review.verifier`, `review.skill` and `per_repo.extra_skills` (plus the built-in general-purpose
   agent), because a personal agent can carry its own hooks.
-- **Limit: your own hooks still run.** The session loads your user settings, so hooks in
-  `~/.claude/settings.json` and in the agents you configure run with the PR checkout as their working
-  directory. Make sure none of them execute files by a relative path (e.g. `./scripts/check.sh`).
+- **Your own hooks are off during reviews.** Hooks from `~/.claude/settings.json` and plugins (reminders,
+  gates written for interactive use) would run with the PR checkout as their working directory, so the
+  review session disables them (`review.disable_user_hooks`, default `true`). The tool guard is not a
+  settings hook and keeps running. If you turn this off, make sure none of your hooks execute files by
+  a relative path (e.g. `./scripts/check.sh`).
 - **git cannot run anything from the PR.** Clones and checkouts ignore your global/system git config
   (hooks, filter drivers) and run with hooks disabled; so does git inside the review session.
 - **Posting is pinned to the owner.** Every `gh` call uses the stored token of `owner.github_login`,

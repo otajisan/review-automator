@@ -50,6 +50,8 @@ export const ConfigSchema = z.object({
       verifier: z.string().min(1).default('review-automator:finding-verifier'),
       language: z.string().min(2).default('en'),
       env: z.record(z.string(), z.string()).default({}),
+      /** Turn off hooks from ~/.claude settings and plugins inside the review session. */
+      disable_user_hooks: z.boolean().default(true),
       per_repo: z.record(z.string(), PerRepoSchema).default({}),
     })
     .prefault({}),

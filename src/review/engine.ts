@@ -66,6 +66,19 @@ function claudeHomeRoots(home: string): string[] {
   return ['skills', 'agents', 'plugins'].map((d) => path.join(home, '.claude', d));
 }
 
+/**
+ * Where Claude Code keeps this session's transcript and the large tool outputs it offloads to files
+ * (`<session>/tool-results/*.txt`) and then reads back. Claude Code names the directory after the
+ * cwd with every character other than letters, digits and `-` replaced by `-`.
+ */
+export function sessionDataDir(
+  home: string,
+  cwd: string,
+  configDir = process.env['CLAUDE_CONFIG_DIR'],
+): string {
+  return path.join(configDir ?? path.join(home, '.claude'), 'projects', cwd.replace(/[^A-Za-z0-9-]/g, '-'));
+}
+
 export interface EngineRun {
   readonly result: ReviewResult;
   readonly costUsd: number;
@@ -92,7 +105,13 @@ export function buildOptions(input: EngineInput, abortController: AbortControlle
   const guard = toolGuardHook(
     {
       cwd: input.cwd,
-      readableRoots: [input.cwd, ...additional, PLUGIN_DIR, ...claudeHomeRoots(input.home ?? homedir())],
+      readableRoots: [
+        input.cwd,
+        ...additional,
+        PLUGIN_DIR,
+        ...claudeHomeRoots(input.home ?? homedir()),
+        sessionDataDir(input.home ?? homedir(), input.cwd),
+      ],
       extraRules: input.perRepo.allowed_tools,
       allowedAgents: [...review.reviewers, review.verifier],
       allowedSkills: [review.skill, ...input.perRepo.extra_skills],
@@ -105,6 +124,10 @@ export function buildOptions(input: EngineInput, abortController: AbortControlle
     // 'project' is deliberately absent: the cwd is the PR head, and its .claude/ (hooks, skills,
     // settings) and CLAUDE.md are attacker-controlled.
     settingSources: ['user'],
+    // The user's own hooks (reminders, gates written for interactive use) would run here with the
+    // untrusted checkout as cwd and get in the way of an unattended review. Hooks passed through
+    // `hooks` below, including the tool guard, are not affected by this setting.
+    ...(review.disable_user_hooks ? { settings: { disableAllHooks: true } } : {}),
     plugins: [{ type: 'local', path: PLUGIN_DIR }],
     systemPrompt: { type: 'preset', preset: 'claude_code', append: input.systemAppend },
     permissionMode: 'dontAsk',
