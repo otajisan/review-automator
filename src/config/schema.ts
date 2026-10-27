@@ -24,6 +24,10 @@ export const ConfigSchema = z.object({
   }),
   github: z.object({
     allowed_repos: z.array(z.string().min(1)).min(1),
+    /** Draft PRs are not ready for review. */
+    skip_drafts: z.boolean().default(true),
+    /** Skip a PR whose current head the owner has already approved. */
+    skip_approved_by_owner: z.boolean().default(true),
   }),
   workspace: z
     .object({

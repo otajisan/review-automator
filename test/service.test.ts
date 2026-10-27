@@ -63,7 +63,7 @@ async function setup(
           url: world.pr.url,
           title: world.pr.title,
           state: world.pr.state,
-          isDraft: false,
+          isDraft: world.pr.isDraft,
           author: { login: world.pr.author },
           headRefOid: world.pr.headSha,
           baseRefName: world.pr.baseRef,
@@ -233,6 +233,89 @@ describe('handleMessage', () => {
     expect(reply?.['text']).toMatch(/timed out/);
     expect(s.slack.of('addReaction').map((r) => r['name'])).toContain('x');
     expect(s.slack.of('postMessage').some((m) => m['channel'] === 'C0NOTIFY1')).toBe(false);
+  });
+});
+
+describe('which PRs are reviewed', () => {
+  const approval = (state: string, commit: string) =>
+    JSON.stringify({ user: 'me', state, commit_id: commit, html_url: 'x', body: '' });
+
+  async function linkPosted(s: Awaited<ReturnType<typeof setup>>) {
+    await s.service.handleMessage(message());
+    await s.service.idle();
+  }
+
+  it('skips draft PRs', async () => {
+    const s = await setup({ pr: { isDraft: true } });
+
+    await linkPosted(s);
+
+    expect(s.review).not.toHaveBeenCalled();
+  });
+
+  it('reviews drafts when skip_drafts is off', async () => {
+    const s = await setup({ pr: { isDraft: true }, configYaml: 'github: { skip_drafts: false }' });
+
+    await linkPosted(s);
+
+    expect(s.review).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips a PR whose current head the owner already approved', async () => {
+    const s = await setup();
+    s.world.existingReviews = [approval('APPROVED', HEAD_SHA)];
+
+    await linkPosted(s);
+
+    expect(s.review).not.toHaveBeenCalled();
+  });
+
+  it('reviews again when the approval was for an earlier commit', async () => {
+    const s = await setup();
+    s.world.existingReviews = [approval('APPROVED', '9'.repeat(40))];
+
+    await linkPosted(s);
+
+    expect(s.review).toHaveBeenCalledTimes(1);
+  });
+
+  it('reviews when the owner later requested changes on the same head', async () => {
+    const s = await setup();
+    s.world.existingReviews = [approval('APPROVED', HEAD_SHA), approval('CHANGES_REQUESTED', HEAD_SHA)];
+
+    await linkPosted(s);
+
+    expect(s.review).toHaveBeenCalledTimes(1);
+  });
+
+  it("ignores other people's approvals and the owner's plain comments", async () => {
+    const s = await setup();
+    s.world.existingReviews = [
+      JSON.stringify({ user: 'alice', state: 'APPROVED', commit_id: HEAD_SHA, html_url: 'x', body: '' }),
+      approval('COMMENTED', HEAD_SHA),
+    ];
+
+    await linkPosted(s);
+
+    expect(s.review).toHaveBeenCalledTimes(1);
+  });
+
+  it('reviews approved PRs when skip_approved_by_owner is off', async () => {
+    const s = await setup({ configYaml: 'github: { skip_approved_by_owner: false }' });
+    s.world.existingReviews = [approval('APPROVED', HEAD_SHA)];
+
+    await linkPosted(s);
+
+    expect(s.review).toHaveBeenCalledTimes(1);
+  });
+
+  it('reviews anyway when existing approvals cannot be checked', async () => {
+    const s = await setup();
+    s.world.existingReviews = ['not json'];
+
+    await linkPosted(s);
+
+    expect(s.review).toHaveBeenCalledTimes(1);
   });
 });
 

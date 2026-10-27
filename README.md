@@ -85,18 +85,20 @@ sequenceDiagram
 
 ## How it behaves
 
-| Situation                                                  | What happens                                                               |
-| ---------------------------------------------------------- | -------------------------------------------------------------------------- |
-| A message in a watched channel contains a PR link          | 👀 on the message, the PR is reviewed (one at a time by default)           |
-| The same PR head was already reviewed                      | Ignored. After a new push, it is reviewed again                            |
-| Review finished                                            | ✅ on the message; summary + buttons in `notify_channel`, mentioning you   |
-| Review failed (timeout, budget, …)                         | ❌ on the message and a thread reply with the reason                       |
-| You press **Post comments & Approve** / **Approve (LGTM)** | One GitHub review with the inline comments and `APPROVE`                   |
-| You press **Post comments** (must-fix found)               | One GitHub review with `COMMENT` (or `REQUEST_CHANGES`, see config)        |
-| You press **Comments only**                                | Same comments, `COMMENT` instead of approval                               |
-| The PR was pushed to after the review                      | Nothing is posted; you get a **Review again** button                       |
-| Your own PR                                                | Reviewed, but only ever posted as `COMMENT` (GitHub forbids self-approval) |
-| Someone else presses a button                              | Refused; only `owner.slack_user_id` can post                               |
+| Situation                                                  | What happens                                                                                                                                             |
+| ---------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A message in a watched channel contains a PR link          | 👀 on the message, the PR is reviewed (one at a time by default)                                                                                         |
+| The same PR head was already reviewed                      | Ignored. After a new push, it is reviewed again                                                                                                          |
+| The PR is merged, closed or a draft                        | Ignored (drafts: unless `github.skip_drafts: false`)                                                                                                     |
+| You already approved the PR's current head                 | Ignored (unless `github.skip_approved_by_owner: false`). An approval of an earlier commit does not count, so new pushes after your approval are reviewed |
+| Review finished                                            | ✅ on the message; summary + buttons in `notify_channel`, mentioning you                                                                                 |
+| Review failed (timeout, budget, …)                         | ❌ on the message and a thread reply with the reason                                                                                                     |
+| You press **Post comments & Approve** / **Approve (LGTM)** | One GitHub review with the inline comments and `APPROVE`                                                                                                 |
+| You press **Post comments** (must-fix found)               | One GitHub review with `COMMENT` (or `REQUEST_CHANGES`, see config)                                                                                      |
+| You press **Comments only**                                | Same comments, `COMMENT` instead of approval                                                                                                             |
+| The PR was pushed to after the review                      | Nothing is posted; you get a **Review again** button                                                                                                     |
+| Your own PR                                                | Reviewed, but only ever posted as `COMMENT` (GitHub forbids self-approval)                                                                               |
+| Someone else presses a button                              | Refused; only `owner.slack_user_id` can post                                                                                                             |
 
 Findings are sorted into: **posted** (must-fix confirmed by the verifier, and should-fix), **needs your
 judgement** (must-fix the verifier could not settle — shown in Slack only), **nits** and **refuted**
