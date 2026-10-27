@@ -240,6 +240,49 @@ describe('runEngine', () => {
     ).rejects.toMatchObject({ kind: 'engine_failed' });
   });
 
+  describe('guard self-check', () => {
+    const toolUse = {
+      type: 'assistant',
+      message: { content: [{ type: 'tool_use', id: 't1', name: 'Read', input: { file_path: 'a.ts' } }] },
+    } as unknown as SDKMessage;
+    const done = success({ complete: true, summary: 's', findings: [] });
+
+    it('fails a review whose tool calls never reached the guard', async () => {
+      // As if a future SDK stopped running callback hooks: tool calls happen, the guard sees nothing.
+      await expect(
+        runEngine({ query: fakeQuery([INIT, toolUse, done]), logger: silentLogger }, input, {
+          timeoutMs: 1000,
+        }),
+      ).rejects.toThrow(/tool guard did not run/);
+    });
+
+    it('accepts the result when the guard inspected the calls', async () => {
+      const guardedQuery: QueryFn = ({ options }) =>
+        (async function* () {
+          yield INIT;
+          const hook = options?.hooks?.PreToolUse?.[0]?.hooks[0];
+          await hook?.(
+            {
+              hook_event_name: 'PreToolUse',
+              tool_name: 'Read',
+              tool_input: { file_path: '/w/a.ts' },
+              tool_use_id: 't1',
+            } as never,
+            't1',
+            { signal: new AbortController().signal },
+          );
+          yield toolUse;
+          yield done;
+        })();
+
+      await expect(
+        runEngine({ query: guardedQuery, logger: silentLogger }, input, { timeoutMs: 1000 }),
+      ).resolves.toMatchObject({
+        result: { complete: true },
+      });
+    });
+  });
+
   it('treats an incomplete review as a failure, never as an empty LGTM', async () => {
     const incomplete = {
       complete: false,

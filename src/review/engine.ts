@@ -96,6 +96,8 @@ export interface EngineInput {
   readonly review: Config['review'];
   /** Called for every tool call the guard denies. */
   readonly onDeny?: (tool: string, reason: string) => void;
+  /** Called each time the guard inspects a tool call. */
+  readonly onToolCheck?: () => void;
   readonly home?: string;
 }
 
@@ -117,6 +119,7 @@ export function buildOptions(input: EngineInput, abortController: AbortControlle
       allowedSkills: [review.skill, ...input.perRepo.extra_skills],
     },
     input.onDeny,
+    input.onToolCheck,
   );
   return {
     cwd: input.cwd,
@@ -175,6 +178,13 @@ export function missingCapabilities(
   return missing;
 }
 
+function countToolUses(content: unknown): number {
+  if (!Array.isArray(content)) return 0;
+  return content.filter(
+    (b) => typeof b === 'object' && b !== null && (b as { type?: unknown }).type === 'tool_use',
+  ).length;
+}
+
 function resultToRun(msg: SDKResultMessage): EngineRun {
   const denials = msg.permission_denials.map(
     (d) => `${d.tool_name} ${JSON.stringify(d.tool_input).slice(0, 200)}`,
@@ -225,7 +235,19 @@ export async function runEngine(
 
   let initError: string[] = [];
   try {
-    for await (const msg of deps.query({ prompt: input.prompt, options: buildOptions(input, abort) })) {
+    // Self-check: the guard must have seen the session's tool calls. If a future SDK stopped running
+    // callback hooks (e.g. under disableAllHooks), reviews fail instead of running unguarded.
+    let guardChecks = 0;
+    let toolUses = 0;
+    const guarded: EngineInput = {
+      ...input,
+      onToolCheck: () => {
+        guardChecks += 1;
+        input.onToolCheck?.();
+      },
+    };
+    for await (const msg of deps.query({ prompt: input.prompt, options: buildOptions(guarded, abort) })) {
+      if (msg.type === 'assistant') toolUses += countToolUses(msg.message.content);
       if (msg.type === 'system' && msg.subtype === 'init') {
         if (msg.plugin_errors?.length) {
           deps.logger.warn({ plugin_errors: msg.plugin_errors }, 'plugin load errors');
@@ -238,7 +260,15 @@ export async function runEngine(
         }
         deps.logger.debug({ model: msg.model, skills: msg.skills.length }, 'review session started');
       }
-      if (msg.type === 'result') return resultToRun(msg);
+      if (msg.type === 'result') {
+        if (toolUses > 0 && guardChecks === 0) {
+          throw new ReviewError(
+            'engine_failed',
+            'the tool guard did not run for this session; refusing the result (check the Agent SDK version)',
+          );
+        }
+        return resultToRun(msg);
+      }
     }
   } catch (err) {
     if (err instanceof ReviewError) throw err;

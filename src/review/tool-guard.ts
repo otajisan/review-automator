@@ -330,11 +330,14 @@ export function evaluateToolCall(toolName: string, input: unknown, ctx: GuardCon
 export function toolGuardHook(
   ctx: GuardContext,
   onDeny?: (tool: string, reason: string) => void,
+  /** Called for every tool call the guard inspects, allowed or not. */
+  onCheck?: () => void,
 ): HookCallbackMatcher {
   return {
     hooks: [
       (input): Promise<HookJSONOutput> => {
         if (input.hook_event_name !== 'PreToolUse') return Promise.resolve({});
+        onCheck?.();
         const verdict = evaluateToolCall(input.tool_name, input.tool_input, ctx);
         if (verdict.allow) return Promise.resolve({});
         onDeny?.(input.tool_name, verdict.reason);
