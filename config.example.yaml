@@ -21,6 +21,8 @@ github:
   # Only PRs in these repositories are reviewed. Globs over owner/repo, case-insensitive.
   allowed_repos:
     - your-org/*
+  skip_drafts: true # do not review draft PRs
+  skip_approved_by_owner: true # do not review a PR whose current head you already approved
 
 # workspace:
 #   dir: ~/Library/Application Support/review-automator/workspace   # clones and per-review worktrees

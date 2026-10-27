@@ -20,6 +20,7 @@ import {
   prSlug,
   type PrInfo,
   fetchMergeBase,
+  ownerApprovedHead,
   type PrRef,
 } from './github/pr.js';
 import { errorMessage } from './lib/errors.js';
@@ -131,6 +132,26 @@ export function createService(deps: ServiceDeps): Service {
     fetchDiffForComments(gh, ref, (step, err) =>
       logger.warn({ pr: prSlug(ref), step, err: errorMessage(err) }, 'PR diff unavailable; falling back'),
     );
+
+  /** Why a linked PR should not be reviewed, or null if it should. */
+  async function skipReason(pr: PrInfo): Promise<string | null> {
+    if (pr.state !== 'OPEN') return `PR is ${pr.state.toLowerCase()}`;
+    if (config.github.skip_drafts && pr.isDraft) return 'PR is a draft';
+    if (config.github.skip_approved_by_owner) {
+      try {
+        if (await ownerApprovedHead(gh, pr, config.owner.github_login, pr.headSha)) {
+          return 'owner already approved the current head';
+        }
+      } catch (err) {
+        // Reviewing needlessly only costs money; skipping wrongly would miss a review.
+        logger.warn(
+          { pr: prSlug(pr), err: errorMessage(err) },
+          'could not check existing approvals; reviewing anyway',
+        );
+      }
+    }
+    return null;
+  }
 
   /** Slack hiccups must never fail a review, so reactions are best effort. */
   const react = async (loc: SlackLocation, add: string, remove?: string): Promise<void> => {
@@ -502,7 +523,11 @@ export function createService(deps: ServiceDeps): Service {
         }
         try {
           const pr = await fetchPr(gh, ref);
-          if (pr.state !== 'OPEN') continue;
+          const skip = await skipReason(pr);
+          if (skip) {
+            logger.info({ pr: prSlug(ref), reason: skip }, 'not reviewing this PR');
+            continue;
+          }
           await startReview(pr, msg.user, source);
         } catch (err) {
           logger.warn({ pr: prSlug(ref), err: errorMessage(err) }, 'could not start review');

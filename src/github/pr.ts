@@ -167,3 +167,33 @@ export async function fetchMergeBase(gh: Gh, ref: PrRef, baseRef: string, headSh
   if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error(`unexpected merge base from GitHub: ${sha.slice(0, 50)}`);
   return sha;
 }
+
+const OwnerReviewSchema = z.object({ user: z.string(), state: z.string(), commit_id: z.string().nullable() });
+
+/**
+ * Whether `login`'s latest decisive review (approve, request changes, or a dismissal) approves
+ * exactly `headSha`. An approval of an earlier commit does not count: new commits after an
+ * approval are usually what the author wants looked at next.
+ */
+export async function ownerApprovedHead(
+  gh: Gh,
+  ref: PrRef,
+  login: string,
+  headSha: string,
+): Promise<boolean> {
+  const out = await gh.run([
+    'api',
+    '--paginate',
+    `repos/${ref.owner}/${ref.repo}/pulls/${ref.number}/reviews`,
+    '--jq',
+    '.[] | {user: .user.login, state, commit_id}',
+  ]);
+  const decisive = out
+    .split('\n')
+    .filter((line) => line.trim().length > 0)
+    .map((line) => OwnerReviewSchema.parse(JSON.parse(line)))
+    .filter((r) => r.user.toLowerCase() === login.toLowerCase())
+    .filter((r) => r.state === 'APPROVED' || r.state === 'CHANGES_REQUESTED' || r.state === 'DISMISSED');
+  const latest = decisive.at(-1); // the API lists reviews in submission order
+  return latest?.state === 'APPROVED' && latest.commit_id === headSha;
+}

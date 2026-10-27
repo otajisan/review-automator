@@ -22,7 +22,7 @@ describe('leftoverPlaceholders', () => {
       ...example,
       owner: { slack_user_id: 'U0REAL0001', github_login: 'someone' },
       slack: { ...example.slack, watch_channels: ['C0REAL0001'], notify_channel: 'C0REAL0002' },
-      github: { allowed_repos: ['acme/*'] },
+      github: { ...example.github, allowed_repos: ['acme/*'] },
     };
 
     expect(leftoverPlaceholders(edited, example)).toEqual([]);
@@ -37,7 +37,7 @@ describe('leftoverPlaceholders', () => {
         watch_channels: ['C0REAL0001', ...example.slack.watch_channels],
         notify_channel: 'C0REAL0002',
       },
-      github: { allowed_repos: ['acme/*'] },
+      github: { ...example.github, allowed_repos: ['acme/*'] },
     };
 
     expect(leftoverPlaceholders(partly, example)).toEqual(['owner.slack_user_id', 'slack.watch_channels']);
