@@ -512,8 +512,12 @@ export function createService(deps: ServiceDeps): Service {
     },
 
     async handleAction(action) {
+      const [reviewId = '', nonce] = action.value.split(':');
+      const log = logger.child({ actionId: action.actionId, reviewId, user: action.userId });
+      log.info('button pressed');
       // The buttons post under the owner's GitHub account, so nobody else may press them.
       if (action.userId !== config.owner.slack_user_id) {
+        log.warn({ owner: config.owner.slack_user_id }, 'button refused: not the configured owner');
         await slack.postEphemeral({
           channel: action.channel ?? config.slack.notify_channel,
           user: action.userId,
@@ -521,9 +525,9 @@ export function createService(deps: ServiceDeps): Service {
         });
         return;
       }
-      const [reviewId = '', nonce] = action.value.split(':');
       const rec = await store.get(reviewId);
       if (!rec) {
+        log.warn('button refused: review not found');
         await slack.postEphemeral({
           channel: config.slack.notify_channel,
           user: action.userId,
@@ -533,6 +537,7 @@ export function createService(deps: ServiceDeps): Service {
       }
       // A button from an earlier notification of this record must not act on a newer result.
       if (rec.notificationNonce !== undefined && nonce !== rec.notificationNonce) {
+        log.warn('button refused: from an older notification');
         await slack.postEphemeral({
           channel: config.slack.notify_channel,
           user: action.userId,

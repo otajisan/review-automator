@@ -3,12 +3,13 @@
  *
  *   pnpm check-setup
  */
-import { mkdtemp } from 'node:fs/promises';
+import { mkdtemp, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import bolt from '@slack/bolt';
-import { loadConfig, type LoadedConfig } from '../src/config/load.js';
+import { loadConfig, parseConfig, type LoadedConfig } from '../src/config/load.js';
+import { leftoverPlaceholders } from '../src/config/placeholders.js';
 import { errorMessage } from '../src/lib/errors.js';
 import { exec } from '../src/lib/exec.js';
 import { buildOptions, missingCapabilities } from '../src/review/engine.js';
@@ -62,6 +63,13 @@ async function main(): Promise<void> {
   });
   if (!loaded) return;
   const { config, secrets } = loaded;
+
+  await check('config has no example placeholders left', async () => {
+    const exampleText = await readFile(new URL('../config.example.yaml', import.meta.url), 'utf8');
+    const left = leftoverPlaceholders(config, parseConfig(exampleText));
+    if (left.length > 0) throw new Error(`still the value from config.example.yaml: ${left.join(', ')}`);
+    return '';
+  });
 
   await check('github login matches config', async () => {
     const login = await ghLogin();
