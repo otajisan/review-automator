@@ -3,12 +3,13 @@
  *
  *   pnpm check-setup
  */
-import { mkdtemp } from 'node:fs/promises';
+import { mkdtemp, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import bolt from '@slack/bolt';
-import { loadConfig, type LoadedConfig } from '../src/config/load.js';
+import { loadConfig, parseConfig, type LoadedConfig } from '../src/config/load.js';
+import { leftoverPlaceholders } from '../src/config/placeholders.js';
 import { errorMessage } from '../src/lib/errors.js';
 import { exec } from '../src/lib/exec.js';
 import { buildOptions, missingCapabilities } from '../src/review/engine.js';
@@ -63,19 +64,11 @@ async function main(): Promise<void> {
   if (!loaded) return;
   const { config, secrets } = loaded;
 
-  await check('config has no example placeholders left', () => {
-    // Values copied verbatim from config.example.yaml. A placeholder owner ID makes every button
-    // press look like a stranger's, so the daemon refuses it.
-    const placeholders: [string, boolean][] = [
-      ['owner.slack_user_id', config.owner.slack_user_id === 'U0123456789'],
-      ['owner.github_login', config.owner.github_login === 'your-github-login'],
-      ['slack.watch_channels', config.slack.watch_channels.includes('C0123456789')],
-      ['slack.notify_channel', config.slack.notify_channel === 'C0987654321'],
-      ['github.allowed_repos', config.github.allowed_repos.some((r) => r.startsWith('your-org/'))],
-    ];
-    const left = placeholders.filter(([, isPlaceholder]) => isPlaceholder).map(([key]) => key);
-    if (left.length > 0) throw new Error(`still the example value: ${left.join(', ')}`);
-    return Promise.resolve('');
+  await check('config has no example placeholders left', async () => {
+    const exampleText = await readFile(new URL('../config.example.yaml', import.meta.url), 'utf8');
+    const left = leftoverPlaceholders(config, parseConfig(exampleText));
+    if (left.length > 0) throw new Error(`still the value from config.example.yaml: ${left.join(', ')}`);
+    return '';
   });
 
   await check('github login matches config', async () => {
