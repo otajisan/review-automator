@@ -12,17 +12,31 @@ import { loadConfig, type LoadedConfig } from '../src/config/load.js';
 import { errorMessage } from '../src/lib/errors.js';
 import { exec } from '../src/lib/exec.js';
 import { buildOptions, missingCapabilities } from '../src/review/engine.js';
+import { classifyChannels, type ChannelProbe } from '../src/slack/channel-check.js';
 
 let failures = 0;
+
+/** Something that could not be verified, but is not known to be broken. Does not fail the run. */
+class Unverified extends Error {}
 
 async function check(name: string, fn: () => Promise<string>): Promise<void> {
   try {
     const detail = await fn();
     process.stdout.write(`✓ ${name}${detail ? ` — ${detail}` : ''}\n`);
   } catch (err) {
+    if (err instanceof Unverified) {
+      process.stdout.write(`! ${name} — ${err.message}\n`);
+      return;
+    }
     failures += 1;
     process.stdout.write(`✗ ${name} — ${errorMessage(err)}\n`);
   }
+}
+
+/** Slack Web API errors carry the API error code (e.g. `missing_scope`) in `data.error`. */
+function slackErrorCode(err: unknown): string {
+  const data = (err as { data?: { error?: unknown } }).data;
+  return typeof data?.error === 'string' ? data.error : errorMessage(err);
 }
 
 const MIN_NODE_MAJOR = 22;
@@ -78,13 +92,26 @@ async function main(): Promise<void> {
     return `${auth.team ?? '?'} as ${auth.user ?? '?'}`;
   });
   await check('bot is in the configured channels', async () => {
-    const ids = [...config.slack.watch_channels, config.slack.notify_channel];
-    const missing: string[] = [];
+    const ids = [...new Set([...config.slack.watch_channels, config.slack.notify_channel])];
+    const probes: ChannelProbe[] = [];
     for (const id of ids) {
-      const info = await slack.conversations.info({ channel: id }).catch(() => undefined);
-      if (!info?.channel?.is_member) missing.push(id);
+      try {
+        const info = await slack.conversations.info({ channel: id });
+        probes.push({ id, isMember: info.channel?.is_member });
+      } catch (err) {
+        probes.push({ id, error: slackErrorCode(err) });
+      }
     }
-    if (missing.length > 0) throw new Error(`invite the bot to: ${missing.join(', ')}`);
+    const { problems, unverified } = classifyChannels(probes);
+    // The app itself does not need channels:read / groups:read, so the manifest leaves them out.
+    const unverifiedNote =
+      unverified.length > 0
+        ? `could not check ${unverified.join(', ')}; add channels:read (and groups:read for private channels) to the app to enable this check, or confirm the invite in Slack`
+        : '';
+    if (problems.length > 0) {
+      throw new Error([problems.join('; '), unverifiedNote].filter(Boolean).join('. Also: '));
+    }
+    if (unverifiedNote) throw new Unverified(unverifiedNote);
     return `${ids.length} channel(s)`;
   });
 
