@@ -1,0 +1,25 @@
+# Create the Slack app from this manifest: https://api.slack.com/apps → Create New App → From a manifest.
+display_information:
+  name: Review Automator
+  description: Reviews pull requests shared in Slack and lets you post the review with one click.
+features:
+  bot_user:
+    display_name: review-automator
+    always_online: false
+oauth_config:
+  scopes:
+    bot:
+      - channels:history # read PR links in public channels you invite the bot to
+      - groups:history # ...and in private channels
+      - chat:write # post summaries, thread replies, ephemeral messages
+      - reactions:write # 👀 / ✅ / ❌ on the request message
+settings:
+  event_subscriptions:
+    bot_events:
+      - message.channels
+      - message.groups
+  interactivity:
+    is_enabled: true
+  org_deploy_enabled: false
+  socket_mode_enabled: true
+  token_rotation_enabled: false

@@ -1,0 +1,16 @@
+node_modules/
+dist/
+coverage/
+*.log
+.DS_Store
+
+# Never commit real configuration or secrets
+config.yaml
+.env
+.env.*
+!.env.example
+*.plist
+!launchd/*.template
+
+# Local tooling
+.serena/
