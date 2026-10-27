@@ -66,6 +66,19 @@ function claudeHomeRoots(home: string): string[] {
   return ['skills', 'agents', 'plugins'].map((d) => path.join(home, '.claude', d));
 }
 
+/**
+ * Where Claude Code keeps this session's transcript and the large tool outputs it offloads to files
+ * (`<session>/tool-results/*.txt`) and then reads back. Claude Code names the directory after the
+ * cwd with every character other than letters, digits and `-` replaced by `-`.
+ */
+export function sessionDataDir(
+  home: string,
+  cwd: string,
+  configDir = process.env['CLAUDE_CONFIG_DIR'],
+): string {
+  return path.join(configDir ?? path.join(home, '.claude'), 'projects', cwd.replace(/[^A-Za-z0-9-]/g, '-'));
+}
+
 export interface EngineRun {
   readonly result: ReviewResult;
   readonly costUsd: number;
@@ -83,6 +96,8 @@ export interface EngineInput {
   readonly review: Config['review'];
   /** Called for every tool call the guard denies. */
   readonly onDeny?: (tool: string, reason: string) => void;
+  /** Called each time the guard inspects a tool call. */
+  readonly onToolCheck?: () => void;
   readonly home?: string;
 }
 
@@ -92,12 +107,19 @@ export function buildOptions(input: EngineInput, abortController: AbortControlle
   const guard = toolGuardHook(
     {
       cwd: input.cwd,
-      readableRoots: [input.cwd, ...additional, PLUGIN_DIR, ...claudeHomeRoots(input.home ?? homedir())],
+      readableRoots: [
+        input.cwd,
+        ...additional,
+        PLUGIN_DIR,
+        ...claudeHomeRoots(input.home ?? homedir()),
+        sessionDataDir(input.home ?? homedir(), input.cwd),
+      ],
       extraRules: input.perRepo.allowed_tools,
       allowedAgents: [...review.reviewers, review.verifier],
       allowedSkills: [review.skill, ...input.perRepo.extra_skills],
     },
     input.onDeny,
+    input.onToolCheck,
   );
   return {
     cwd: input.cwd,
@@ -105,6 +127,10 @@ export function buildOptions(input: EngineInput, abortController: AbortControlle
     // 'project' is deliberately absent: the cwd is the PR head, and its .claude/ (hooks, skills,
     // settings) and CLAUDE.md are attacker-controlled.
     settingSources: ['user'],
+    // The user's own hooks (reminders, gates written for interactive use) would run here with the
+    // untrusted checkout as cwd and get in the way of an unattended review. Hooks passed through
+    // `hooks` below, including the tool guard, are not affected by this setting.
+    ...(review.disable_user_hooks ? { settings: { disableAllHooks: true } } : {}),
     plugins: [{ type: 'local', path: PLUGIN_DIR }],
     systemPrompt: { type: 'preset', preset: 'claude_code', append: input.systemAppend },
     permissionMode: 'dontAsk',
@@ -150,6 +176,13 @@ export function missingCapabilities(
     for (const a of [...review.reviewers, review.verifier]) if (!agents.has(a)) missing.push(`agent ${a}`);
   }
   return missing;
+}
+
+function countToolUses(content: unknown): number {
+  if (!Array.isArray(content)) return 0;
+  return content.filter(
+    (b) => typeof b === 'object' && b !== null && (b as { type?: unknown }).type === 'tool_use',
+  ).length;
 }
 
 function resultToRun(msg: SDKResultMessage): EngineRun {
@@ -202,7 +235,19 @@ export async function runEngine(
 
   let initError: string[] = [];
   try {
-    for await (const msg of deps.query({ prompt: input.prompt, options: buildOptions(input, abort) })) {
+    // Self-check: the guard must have seen the session's tool calls. If a future SDK stopped running
+    // callback hooks (e.g. under disableAllHooks), reviews fail instead of running unguarded.
+    let guardChecks = 0;
+    let toolUses = 0;
+    const guarded: EngineInput = {
+      ...input,
+      onToolCheck: () => {
+        guardChecks += 1;
+        input.onToolCheck?.();
+      },
+    };
+    for await (const msg of deps.query({ prompt: input.prompt, options: buildOptions(guarded, abort) })) {
+      if (msg.type === 'assistant') toolUses += countToolUses(msg.message.content);
       if (msg.type === 'system' && msg.subtype === 'init') {
         if (msg.plugin_errors?.length) {
           deps.logger.warn({ plugin_errors: msg.plugin_errors }, 'plugin load errors');
@@ -215,7 +260,15 @@ export async function runEngine(
         }
         deps.logger.debug({ model: msg.model, skills: msg.skills.length }, 'review session started');
       }
-      if (msg.type === 'result') return resultToRun(msg);
+      if (msg.type === 'result') {
+        if (toolUses > 0 && guardChecks === 0) {
+          throw new ReviewError(
+            'engine_failed',
+            'the tool guard did not run for this session; refusing the result (check the Agent SDK version)',
+          );
+        }
+        return resultToRun(msg);
+      }
     }
   } catch (err) {
     if (err instanceof ReviewError) throw err;

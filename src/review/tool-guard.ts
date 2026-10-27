@@ -90,6 +90,7 @@ export function tokenize(command: string, opts: { strict?: boolean } = {}): stri
   let current = '';
   let quote: '"' | "'" | null = null;
   let inToken = false;
+  let escaped = false; // previous char was a backslash inside double quotes
   for (const ch of command) {
     if (quote === "'") {
       if (ch === "'") quote = null;
@@ -97,8 +98,14 @@ export function tokenize(command: string, opts: { strict?: boolean } = {}): stri
       continue;
     }
     if (quote === '"') {
-      if (ch === '"') quote = null;
-      else if (ch === '$' || ch === '\\') return null;
+      // POSIX: inside double quotes a backslash only escapes $ ` " \; elsewhere (`\b`, `\|` in a
+      // regex) it is a literal backslash. Either way nothing is expanded or executed.
+      if (escaped) {
+        current += '$`"\\'.includes(ch) ? ch : `\\${ch}`;
+        escaped = false;
+      } else if (ch === '\\') escaped = true;
+      else if (ch === '"') quote = null;
+      else if (ch === '$') return null;
       else current += ch;
       continue;
     }
@@ -323,11 +330,14 @@ export function evaluateToolCall(toolName: string, input: unknown, ctx: GuardCon
 export function toolGuardHook(
   ctx: GuardContext,
   onDeny?: (tool: string, reason: string) => void,
+  /** Called for every tool call the guard inspects, allowed or not. */
+  onCheck?: () => void,
 ): HookCallbackMatcher {
   return {
     hooks: [
       (input): Promise<HookJSONOutput> => {
         if (input.hook_event_name !== 'PreToolUse') return Promise.resolve({});
+        onCheck?.();
         const verdict = evaluateToolCall(input.tool_name, input.tool_input, ctx);
         if (verdict.allow) return Promise.resolve({});
         onDeny?.(input.tool_name, verdict.reason);
