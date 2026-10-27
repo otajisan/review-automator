@@ -97,7 +97,10 @@ export function createSlackApp(opts: {
   app.action({ type: 'block_actions', action_id: /^ra_/ }, async ({ ack, body, action }) => {
     await ack(); // Slack requires an ack within 3 seconds; the work continues after it.
     const value = 'value' in action ? str(action.value) : undefined;
-    if (!value) return;
+    if (!value) {
+      log.warn({ actionId: action.action_id }, 'button without a value ignored');
+      return;
+    }
     void opts
       .service()
       .handleAction({

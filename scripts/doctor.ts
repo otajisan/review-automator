@@ -49,6 +49,21 @@ async function main(): Promise<void> {
   if (!loaded) return;
   const { config, secrets } = loaded;
 
+  await check('config has no example placeholders left', () => {
+    // Values copied verbatim from config.example.yaml. A placeholder owner ID makes every button
+    // press look like a stranger's, so the daemon refuses it.
+    const placeholders: [string, boolean][] = [
+      ['owner.slack_user_id', config.owner.slack_user_id === 'U0123456789'],
+      ['owner.github_login', config.owner.github_login === 'your-github-login'],
+      ['slack.watch_channels', config.slack.watch_channels.includes('C0123456789')],
+      ['slack.notify_channel', config.slack.notify_channel === 'C0987654321'],
+      ['github.allowed_repos', config.github.allowed_repos.some((r) => r.startsWith('your-org/'))],
+    ];
+    const left = placeholders.filter(([, isPlaceholder]) => isPlaceholder).map(([key]) => key);
+    if (left.length > 0) throw new Error(`still the example value: ${left.join(', ')}`);
+    return Promise.resolve('');
+  });
+
   await check('github login matches config', async () => {
     const login = await ghLogin();
     if (login.toLowerCase() !== config.owner.github_login.toLowerCase()) {
