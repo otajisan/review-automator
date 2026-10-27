@@ -12,6 +12,7 @@ import { loadConfig, type LoadedConfig } from '../src/config/load.js';
 import { errorMessage } from '../src/lib/errors.js';
 import { exec } from '../src/lib/exec.js';
 import { buildOptions, missingCapabilities } from '../src/review/engine.js';
+import { classifyChannels, type ChannelProbe } from '../src/slack/channel-check.js';
 
 let failures = 0;
 
@@ -77,23 +78,25 @@ async function main(): Promise<void> {
   });
   await check('bot is in the configured channels', async () => {
     const ids = [...new Set([...config.slack.watch_channels, config.slack.notify_channel])];
-    const notMember: string[] = [];
-    const unknown: string[] = [];
+    const probes: ChannelProbe[] = [];
     for (const id of ids) {
       try {
         const info = await slack.conversations.info({ channel: id });
-        if (!info.channel?.is_member) notMember.push(id);
+        probes.push({ id, isMember: info.channel?.is_member });
       } catch (err) {
-        unknown.push(`${id} (${slackErrorCode(err)})`);
+        probes.push({ id, error: slackErrorCode(err) });
       }
     }
-    if (notMember.length > 0) throw new Error(`invite the bot to: ${notMember.join(', ')}`);
-    if (unknown.length > 0) {
-      // The app itself does not need channels:read / groups:read, so the manifest leaves them out.
-      throw new Unverified(
-        `could not check ${unknown.join(', ')}; add channels:read (and groups:read for private channels) to the app to enable this check, or confirm the invite in Slack`,
-      );
+    const { problems, unverified } = classifyChannels(probes);
+    // The app itself does not need channels:read / groups:read, so the manifest leaves them out.
+    const unverifiedNote =
+      unverified.length > 0
+        ? `could not check ${unverified.join(', ')}; add channels:read (and groups:read for private channels) to the app to enable this check, or confirm the invite in Slack`
+        : '';
+    if (problems.length > 0) {
+      throw new Error([problems.join('; '), unverifiedNote].filter(Boolean).join('. Also: '));
     }
+    if (unverifiedNote) throw new Unverified(unverifiedNote);
     return `${ids.length} channel(s)`;
   });
 
