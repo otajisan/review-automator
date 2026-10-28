@@ -156,34 +156,78 @@ export function createService(deps: ServiceDeps): Service {
   /**
    * One Slack message can link several PRs. Its reactions describe the message as a whole: 👀 from
    * the first review started until the last one ends, then ✅ if all succeeded, otherwise ❌.
+   * `reading` stays true while the message's links are still being started, so a review that
+   * finishes quickly cannot settle the reaction before its siblings are registered.
    */
-  const sourceProgress = new Map<string, { pending: number; failed: boolean }>();
+  interface SourceState {
+    readonly pending: number;
+    readonly failed: boolean;
+    readonly reading: boolean;
+    readonly eyes: boolean;
+  }
+  const sourceProgress = new Map<string, SourceState>();
   const sourceKey = (loc: SlackLocation): string => `${loc.channel}:${loc.ts}`;
+  const IDLE: SourceState = { pending: 0, failed: false, reading: false, eyes: false };
 
-  async function sourceStarted(loc: SlackLocation): Promise<void> {
-    const entry = sourceProgress.get(sourceKey(loc));
-    if (entry) {
-      sourceProgress.set(sourceKey(loc), { ...entry, pending: entry.pending + 1 });
+  /** Puts the final reaction once nothing is running or still being read. */
+  async function settle(loc: SlackLocation, state: SourceState): Promise<void> {
+    if (state.pending > 0 || state.reading) {
+      sourceProgress.set(sourceKey(loc), state);
       return;
     }
-    sourceProgress.set(sourceKey(loc), { pending: 1, failed: false });
-    await react(loc, REACTION.working);
+    sourceProgress.delete(sourceKey(loc));
+    // Nothing was started and nothing failed (e.g. only merged PRs): leave the message alone.
+    if (!state.eyes && !state.failed) return;
+    await react(
+      loc,
+      state.failed ? REACTION.failed : REACTION.done,
+      state.eyes ? REACTION.working : undefined,
+    );
+  }
+
+  async function sourceStarted(loc: SlackLocation): Promise<void> {
+    const state = sourceProgress.get(sourceKey(loc)) ?? IDLE;
+    sourceProgress.set(sourceKey(loc), { ...state, pending: state.pending + 1, eyes: true });
+    if (!state.eyes) await react(loc, REACTION.working);
   }
 
   async function sourceFinished(loc: SlackLocation, ok: boolean): Promise<void> {
-    const entry = sourceProgress.get(sourceKey(loc));
-    if (!entry) {
+    const state = sourceProgress.get(sourceKey(loc));
+    if (!state) {
       // Started before a restart: nothing to aggregate with, so report this review alone.
       await react(loc, ok ? REACTION.done : REACTION.failed, REACTION.working);
       return;
     }
-    const next = { pending: entry.pending - 1, failed: entry.failed || !ok };
-    if (next.pending > 0) {
-      sourceProgress.set(sourceKey(loc), next);
-      return;
+    await settle(loc, { ...state, pending: state.pending - 1, failed: state.failed || !ok });
+  }
+
+  /** Starts a review for every eligible PR linked in one message; reactions settle once at the end. */
+  async function startLinkedReviews(text: string, user: string, source: SlackLocation): Promise<void> {
+    sourceProgress.set(sourceKey(source), { ...IDLE, reading: true });
+    let linkFailed = false;
+    try {
+      for (const ref of extractPrRefs(text)) {
+        if (!isRepoAllowed(ref, config.github.allowed_repos)) {
+          logger.debug({ pr: prSlug(ref) }, 'repository not in allowed_repos; ignoring');
+          continue;
+        }
+        try {
+          const pr = await fetchPr(gh, ref);
+          const skip = await skipReason(pr);
+          if (skip) {
+            logger.info({ pr: prSlug(ref), reason: skip }, 'not reviewing this PR');
+            continue;
+          }
+          await startReview(pr, user, source);
+        } catch (err) {
+          logger.warn({ pr: prSlug(ref), err: errorMessage(err) }, 'could not start review');
+          linkFailed = true;
+        }
+      }
+    } finally {
+      const state = sourceProgress.get(sourceKey(source)) ?? IDLE;
+      await settle(source, { ...state, reading: false, failed: state.failed || linkFailed });
     }
-    sourceProgress.delete(sourceKey(loc));
-    await react(loc, next.failed ? REACTION.failed : REACTION.done, REACTION.working);
   }
 
   /** Slack hiccups must never fail a review, so reactions are best effort. */
@@ -552,25 +596,7 @@ export function createService(deps: ServiceDeps): Service {
       }
       const requesters = config.slack.allowed_requesters;
       if (requesters.length > 0 && !requesters.includes(msg.user)) return;
-      const source = { channel: msg.channel, ts: msg.ts };
-      for (const ref of extractPrRefs(msg.text)) {
-        if (!isRepoAllowed(ref, config.github.allowed_repos)) {
-          logger.debug({ pr: prSlug(ref) }, 'repository not in allowed_repos; ignoring');
-          continue;
-        }
-        try {
-          const pr = await fetchPr(gh, ref);
-          const skip = await skipReason(pr);
-          if (skip) {
-            logger.info({ pr: prSlug(ref), reason: skip }, 'not reviewing this PR');
-            continue;
-          }
-          await startReview(pr, msg.user, source);
-        } catch (err) {
-          logger.warn({ pr: prSlug(ref), err: errorMessage(err) }, 'could not start review');
-          await react(source, REACTION.failed);
-        }
-      }
+      await startLinkedReviews(msg.text, msg.user, { channel: msg.channel, ts: msg.ts });
     },
 
     async handleAction(action) {

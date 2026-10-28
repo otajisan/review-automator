@@ -7,7 +7,7 @@ export interface Call {
   readonly opts: ExecOptions | undefined;
 }
 
-type Responder = (call: Call) => Partial<ExecResult> | string;
+type Responder = (call: Call) => Partial<ExecResult> | string | Promise<Partial<ExecResult> | string>;
 
 /** Records every invocation; responds by first matching predicate. Unmatched calls fail loudly. */
 export function fakeExec(routes: [(call: Call) => boolean, Responder][]): { exec: Exec; calls: Call[] } {
@@ -17,12 +17,15 @@ export function fakeExec(routes: [(call: Call) => boolean, Responder][]): { exec
     calls.push(call);
     const route = routes.find(([match]) => match(call));
     if (!route) return Promise.reject(new Error(`unexpected exec: ${cmd} ${args.join(' ')}`));
-    const out = route[1](call);
-    const result: ExecResult =
-      typeof out === 'string'
-        ? { stdout: out, stderr: '', exitCode: 0 }
-        : { stdout: '', stderr: '', exitCode: 0, ...out };
-    return result.exitCode === 0 ? Promise.resolve(result) : Promise.reject(new ExecError(cmd, args, result));
+    // A responder may return a promise to model a slow command.
+    return Promise.resolve(route[1](call)).then((out) => {
+      const result: ExecResult =
+        typeof out === 'string'
+          ? { stdout: out, stderr: '', exitCode: 0 }
+          : { stdout: '', stderr: '', exitCode: 0, ...out };
+      if (result.exitCode !== 0) throw new ExecError(cmd, args, result);
+      return result;
+    });
   };
   return { exec, calls };
 }

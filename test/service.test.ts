@@ -28,6 +28,10 @@ const DIFF = `diff --git a/src/a.ts b/src/a.ts
 
 interface World {
   pr: PrInfo;
+  /** Per PR number: delay `gh pr view` (ms), or make it fail. */
+  viewDelayMs: Record<number, number>;
+  viewFails: number[];
+  mergedNumbers: number[];
   findings: Finding[];
   apiFailures: number;
   /** stderr of a failing POST; a non-4xx message means the outcome is unknown. */
@@ -47,6 +51,9 @@ async function setup(
   const world: World = {
     pr: testPr(opts.pr),
     findings: opts.findings ?? [],
+    viewDelayMs: {},
+    viewFails: [],
+    mergedNumbers: [],
     apiFailures: 0,
     apiFailStderr: 'HTTP 422: Unprocessable Entity',
     apiFailCreates: false,
@@ -58,18 +65,23 @@ async function setup(
     [
       argsStartWith('pr', 'view'),
       // Answers for whichever PR number was asked, so one message can link several PRs.
-      (call) =>
-        JSON.stringify({
-          number: Number(call.args[2]),
-          url: `https://github.com/acme/api/pull/${call.args[2]}`,
+      async (call) => {
+        const n = Number(call.args[2]);
+        const delay = world.viewDelayMs[n] ?? 0;
+        if (delay > 0) await new Promise((r) => setTimeout(r, delay));
+        if (world.viewFails.includes(n)) return { exitCode: 1, stderr: 'HTTP 404: Not Found' };
+        return JSON.stringify({
+          number: n,
+          url: `https://github.com/acme/api/pull/${n}`,
           title: world.pr.title,
-          state: world.pr.state,
+          state: world.mergedNumbers.includes(n) ? 'MERGED' : world.pr.state,
           isDraft: world.pr.isDraft,
           author: { login: world.pr.author },
           headRefOid: world.pr.headSha,
           baseRefName: world.pr.baseRef,
           body: world.pr.body,
-        }),
+        });
+      },
     ],
     [
       argsStartWith('pr', 'diff'),
@@ -281,6 +293,40 @@ describe('several PRs in one message', () => {
       .filter((c) => c.method === 'addReaction' || c.method === 'removeReaction')
       .map((c) => `${c.method === 'addReaction' ? '+' : '-'}${String(c.args['name'])}`);
     expect(onSource).toEqual(['+eyes', '-eyes', '+white_check_mark']);
+  });
+
+  it('does not settle early when the first review fails before the next link is read', async () => {
+    const s = await setup({ review: () => Promise.reject(new Error('fails at once')) });
+    s.world.viewDelayMs = { 8: 50 }; // PR #8 is looked up slowly
+
+    await s.service.handleMessage(twoLinks());
+    await s.service.idle();
+
+    const onSource = s.slack.calls
+      .filter((c) => c.method === 'addReaction' || c.method === 'removeReaction')
+      .map((c) => `${c.method === 'addReaction' ? '+' : '-'}${String(c.args['name'])}`);
+    expect(onSource).toEqual(['+eyes', '-eyes', '+x']);
+  });
+
+  it('adds no reaction when every linked PR is skipped', async () => {
+    const s = await setup();
+    s.world.mergedNumbers = [7, 8];
+
+    await s.service.handleMessage(twoLinks());
+    await s.service.idle();
+
+    expect(s.slack.of('addReaction')).toEqual([]);
+  });
+
+  it('shows ❌ when one link cannot even be looked up', async () => {
+    const s = await setup();
+    s.world.viewFails = [8];
+
+    await s.service.handleMessage(twoLinks());
+    await s.service.idle();
+
+    expect(s.slack.of('addReaction').map((r) => r['name'])).toEqual(['eyes', 'x']);
+    expect(s.review).toHaveBeenCalledTimes(1);
   });
 
   it('shows ❌ (not ✅ and ❌) when one of the PRs fails', async () => {
