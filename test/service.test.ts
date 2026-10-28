@@ -28,6 +28,10 @@ const DIFF = `diff --git a/src/a.ts b/src/a.ts
 
 interface World {
   pr: PrInfo;
+  /** Per PR number: delay `gh pr view` (ms), or make it fail. */
+  viewDelayMs: Record<number, number>;
+  viewFails: number[];
+  mergedNumbers: number[];
   findings: Finding[];
   apiFailures: number;
   /** stderr of a failing POST; a non-4xx message means the outcome is unknown. */
@@ -47,6 +51,9 @@ async function setup(
   const world: World = {
     pr: testPr(opts.pr),
     findings: opts.findings ?? [],
+    viewDelayMs: {},
+    viewFails: [],
+    mergedNumbers: [],
     apiFailures: 0,
     apiFailStderr: 'HTTP 422: Unprocessable Entity',
     apiFailCreates: false,
@@ -57,18 +64,24 @@ async function setup(
   const { exec, calls } = fakeExec([
     [
       argsStartWith('pr', 'view'),
-      () =>
-        JSON.stringify({
-          number: world.pr.number,
-          url: world.pr.url,
+      // Answers for whichever PR number was asked, so one message can link several PRs.
+      async (call) => {
+        const n = Number(call.args[2]);
+        const delay = world.viewDelayMs[n] ?? 0;
+        if (delay > 0) await new Promise((r) => setTimeout(r, delay));
+        if (world.viewFails.includes(n)) return { exitCode: 1, stderr: 'HTTP 404: Not Found' };
+        return JSON.stringify({
+          number: n,
+          url: `https://github.com/acme/api/pull/${n}`,
           title: world.pr.title,
-          state: world.pr.state,
+          state: world.mergedNumbers.includes(n) ? 'MERGED' : world.pr.state,
           isDraft: world.pr.isDraft,
           author: { login: world.pr.author },
           headRefOid: world.pr.headSha,
           baseRefName: world.pr.baseRef,
           body: world.pr.body,
-        }),
+        });
+      },
     ],
     [
       argsStartWith('pr', 'diff'),
@@ -221,6 +234,27 @@ describe('handleMessage', () => {
     expect(reply).toContain('&lt;!channel&gt;');
   });
 
+  it('ignores posts by ignored_requesters, e.g. your own', async () => {
+    const s = await setup({ configYaml: 'slack: { ignored_requesters: [U0REQ0001] }' });
+
+    await s.service.handleMessage(message());
+    await s.service.handleMessage(message({ user: 'U0OTHER01', ts: '300.1' }));
+    await s.service.idle();
+
+    expect(s.review).toHaveBeenCalledTimes(1);
+  });
+
+  it('lets ignored_requesters win over allowed_requesters', async () => {
+    const s = await setup({
+      configYaml: 'slack: { allowed_requesters: [U0REQ0001], ignored_requesters: [U0REQ0001] }',
+    });
+
+    await s.service.handleMessage(message());
+    await s.service.idle();
+
+    expect(s.review).not.toHaveBeenCalled();
+  });
+
   it('marks the request failed and replies in thread when the review fails', async () => {
     const s = await setup({
       review: () => Promise.reject(new ReviewError('timeout', 'review timed out after 20 minutes')),
@@ -233,6 +267,92 @@ describe('handleMessage', () => {
     expect(reply?.['text']).toMatch(/timed out/);
     expect(s.slack.of('addReaction').map((r) => r['name'])).toContain('x');
     expect(s.slack.of('postMessage').some((m) => m['channel'] === 'C0NOTIFY1')).toBe(false);
+  });
+});
+
+describe('several PRs in one message', () => {
+  const twoLinks = () => message({ text: `please review ${URL} and https://github.com/acme/api/pull/8` });
+
+  it('reviews and notifies each PR separately', async () => {
+    const s = await setup();
+
+    await s.service.handleMessage(twoLinks());
+    await s.service.idle();
+
+    expect(s.review).toHaveBeenCalledTimes(2);
+    expect(s.slack.of('postMessage').filter((m) => m['channel'] === 'C0NOTIFY1')).toHaveLength(2);
+  });
+
+  it('keeps 👀 until every PR is done, then shows one result', async () => {
+    const s = await setup();
+
+    await s.service.handleMessage(twoLinks());
+    await s.service.idle();
+
+    const onSource = s.slack.calls
+      .filter((c) => c.method === 'addReaction' || c.method === 'removeReaction')
+      .map((c) => `${c.method === 'addReaction' ? '+' : '-'}${String(c.args['name'])}`);
+    expect(onSource).toEqual(['+eyes', '-eyes', '+white_check_mark']);
+  });
+
+  it('does not settle early when the first review fails before the next link is read', async () => {
+    const s = await setup({ review: () => Promise.reject(new Error('fails at once')) });
+    s.world.viewDelayMs = { 8: 50 }; // PR #8 is looked up slowly
+
+    await s.service.handleMessage(twoLinks());
+    await s.service.idle();
+
+    const onSource = s.slack.calls
+      .filter((c) => c.method === 'addReaction' || c.method === 'removeReaction')
+      .map((c) => `${c.method === 'addReaction' ? '+' : '-'}${String(c.args['name'])}`);
+    expect(onSource).toEqual(['+eyes', '-eyes', '+x']);
+  });
+
+  it('adds no reaction when every linked PR is skipped', async () => {
+    const s = await setup();
+    s.world.mergedNumbers = [7, 8];
+
+    await s.service.handleMessage(twoLinks());
+    await s.service.idle();
+
+    expect(s.slack.of('addReaction')).toEqual([]);
+  });
+
+  it('shows ❌ when one link cannot even be looked up', async () => {
+    const s = await setup();
+    s.world.viewFails = [8];
+
+    await s.service.handleMessage(twoLinks());
+    await s.service.idle();
+
+    expect(s.slack.of('addReaction').map((r) => r['name'])).toEqual(['eyes', 'x']);
+    expect(s.review).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows ❌ (not ✅ and ❌) when one of the PRs fails', async () => {
+    let n = 0;
+    const s = await setup({
+      review: (_ref, _id, o) => {
+        n += 1;
+        if (n === 2) return Promise.reject(new Error('boom'));
+        return Promise.resolve({
+          pr: o.pr,
+          headSha: o.pr.headSha,
+          baseSha: BASE_SHA,
+          result: { complete: true, summary: 's', findings: [] },
+          classified: classify([]),
+          costUsd: 0.1,
+          numTurns: 1,
+          permissionDenials: [],
+        });
+      },
+    });
+
+    await s.service.handleMessage(twoLinks());
+    await s.service.idle();
+
+    const added = s.slack.of('addReaction').map((r) => r['name']);
+    expect(added).toEqual(['eyes', 'x']);
   });
 });
 

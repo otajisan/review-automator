@@ -21,6 +21,8 @@ export const ConfigSchema = z.object({
     notify_channel: SlackId,
     /** Who may trigger a review by posting a link. Empty means anyone in the watched channels. */
     allowed_requesters: z.array(SlackId).default([]),
+    /** Whose posts never trigger a review (e.g. your own). Wins over allowed_requesters. */
+    ignored_requesters: z.array(SlackId).default([]),
   }),
   github: z.object({
     allowed_repos: z.array(z.string().min(1)).min(1),
