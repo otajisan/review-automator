@@ -16,6 +16,8 @@ slack:
   # Who may trigger a review by posting a link. Empty = anyone in the watched channels.
   # Restrict this if outsiders (e.g. Slack Connect guests) can post there.
   allowed_requesters: []
+  # Whose posts never trigger a review, e.g. your own member ID. Wins over allowed_requesters.
+  ignored_requesters: []
 
 github:
   # Only PRs in these repositories are reviewed. Globs over owner/repo, case-insensitive.

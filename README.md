@@ -88,6 +88,8 @@ sequenceDiagram
 | Situation                                                  | What happens                                                                                                                                             |
 | ---------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | A message in a watched channel contains a PR link          | 👀 on the message, the PR is reviewed (one at a time by default)                                                                                         |
+| A message links several PRs                                | Each PR is reviewed and notified separately; the message keeps 👀 until all are done, then gets ✅ (all succeeded) or ❌ (any failed)                    |
+| The poster is in `slack.ignored_requesters`                | Ignored                                                                                                                                                  |
 | The same PR head was already reviewed                      | Ignored. After a new push, it is reviewed again                                                                                                          |
 | The PR is merged, closed or a draft                        | Ignored (drafts: unless `github.skip_drafts: false`)                                                                                                     |
 | You already approved the PR's current head                 | Ignored (unless `github.skip_approved_by_owner: false`). An approval of an earlier commit does not count, so new pushes after your approval are reviewed |
@@ -171,7 +173,8 @@ can do.
   text that looks like a credential is never posted.
 - **Only you can post**, after reading a preview of each comment in Slack. The head commit is checked
   again before posting and the review is pinned to it.
-- **Only listed people can trigger reviews** if you set `slack.allowed_requesters`.
+- **You choose who can trigger reviews**: `slack.allowed_requesters` (only these people) and
+  `slack.ignored_requesters` (never these people, e.g. yourself; it wins over the allow list).
 - **Secrets stay local.** Slack tokens live in `~/.config/review-automator/.env` (0600); there is no
   GitHub token in config. Review state is kept under `~/Library/Application Support/review-automator`.
 

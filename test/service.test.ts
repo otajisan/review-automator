@@ -57,10 +57,11 @@ async function setup(
   const { exec, calls } = fakeExec([
     [
       argsStartWith('pr', 'view'),
-      () =>
+      // Answers for whichever PR number was asked, so one message can link several PRs.
+      (call) =>
         JSON.stringify({
-          number: world.pr.number,
-          url: world.pr.url,
+          number: Number(call.args[2]),
+          url: `https://github.com/acme/api/pull/${call.args[2]}`,
           title: world.pr.title,
           state: world.pr.state,
           isDraft: world.pr.isDraft,
@@ -221,6 +222,27 @@ describe('handleMessage', () => {
     expect(reply).toContain('&lt;!channel&gt;');
   });
 
+  it('ignores posts by ignored_requesters, e.g. your own', async () => {
+    const s = await setup({ configYaml: 'slack: { ignored_requesters: [U0REQ0001] }' });
+
+    await s.service.handleMessage(message());
+    await s.service.handleMessage(message({ user: 'U0OTHER01', ts: '300.1' }));
+    await s.service.idle();
+
+    expect(s.review).toHaveBeenCalledTimes(1);
+  });
+
+  it('lets ignored_requesters win over allowed_requesters', async () => {
+    const s = await setup({
+      configYaml: 'slack: { allowed_requesters: [U0REQ0001], ignored_requesters: [U0REQ0001] }',
+    });
+
+    await s.service.handleMessage(message());
+    await s.service.idle();
+
+    expect(s.review).not.toHaveBeenCalled();
+  });
+
   it('marks the request failed and replies in thread when the review fails', async () => {
     const s = await setup({
       review: () => Promise.reject(new ReviewError('timeout', 'review timed out after 20 minutes')),
@@ -233,6 +255,58 @@ describe('handleMessage', () => {
     expect(reply?.['text']).toMatch(/timed out/);
     expect(s.slack.of('addReaction').map((r) => r['name'])).toContain('x');
     expect(s.slack.of('postMessage').some((m) => m['channel'] === 'C0NOTIFY1')).toBe(false);
+  });
+});
+
+describe('several PRs in one message', () => {
+  const twoLinks = () => message({ text: `please review ${URL} and https://github.com/acme/api/pull/8` });
+
+  it('reviews and notifies each PR separately', async () => {
+    const s = await setup();
+
+    await s.service.handleMessage(twoLinks());
+    await s.service.idle();
+
+    expect(s.review).toHaveBeenCalledTimes(2);
+    expect(s.slack.of('postMessage').filter((m) => m['channel'] === 'C0NOTIFY1')).toHaveLength(2);
+  });
+
+  it('keeps 👀 until every PR is done, then shows one result', async () => {
+    const s = await setup();
+
+    await s.service.handleMessage(twoLinks());
+    await s.service.idle();
+
+    const onSource = s.slack.calls
+      .filter((c) => c.method === 'addReaction' || c.method === 'removeReaction')
+      .map((c) => `${c.method === 'addReaction' ? '+' : '-'}${String(c.args['name'])}`);
+    expect(onSource).toEqual(['+eyes', '-eyes', '+white_check_mark']);
+  });
+
+  it('shows ❌ (not ✅ and ❌) when one of the PRs fails', async () => {
+    let n = 0;
+    const s = await setup({
+      review: (_ref, _id, o) => {
+        n += 1;
+        if (n === 2) return Promise.reject(new Error('boom'));
+        return Promise.resolve({
+          pr: o.pr,
+          headSha: o.pr.headSha,
+          baseSha: BASE_SHA,
+          result: { complete: true, summary: 's', findings: [] },
+          classified: classify([]),
+          costUsd: 0.1,
+          numTurns: 1,
+          permissionDenials: [],
+        });
+      },
+    });
+
+    await s.service.handleMessage(twoLinks());
+    await s.service.idle();
+
+    const added = s.slack.of('addReaction').map((r) => r['name']);
+    expect(added).toEqual(['eyes', 'x']);
   });
 });
 

@@ -153,6 +153,39 @@ export function createService(deps: ServiceDeps): Service {
     return null;
   }
 
+  /**
+   * One Slack message can link several PRs. Its reactions describe the message as a whole: 👀 from
+   * the first review started until the last one ends, then ✅ if all succeeded, otherwise ❌.
+   */
+  const sourceProgress = new Map<string, { pending: number; failed: boolean }>();
+  const sourceKey = (loc: SlackLocation): string => `${loc.channel}:${loc.ts}`;
+
+  async function sourceStarted(loc: SlackLocation): Promise<void> {
+    const entry = sourceProgress.get(sourceKey(loc));
+    if (entry) {
+      sourceProgress.set(sourceKey(loc), { ...entry, pending: entry.pending + 1 });
+      return;
+    }
+    sourceProgress.set(sourceKey(loc), { pending: 1, failed: false });
+    await react(loc, REACTION.working);
+  }
+
+  async function sourceFinished(loc: SlackLocation, ok: boolean): Promise<void> {
+    const entry = sourceProgress.get(sourceKey(loc));
+    if (!entry) {
+      // Started before a restart: nothing to aggregate with, so report this review alone.
+      await react(loc, ok ? REACTION.done : REACTION.failed, REACTION.working);
+      return;
+    }
+    const next = { pending: entry.pending - 1, failed: entry.failed || !ok };
+    if (next.pending > 0) {
+      sourceProgress.set(sourceKey(loc), next);
+      return;
+    }
+    sourceProgress.delete(sourceKey(loc));
+    await react(loc, next.failed ? REACTION.failed : REACTION.done, REACTION.working);
+  }
+
   /** Slack hiccups must never fail a review, so reactions are best effort. */
   const react = async (loc: SlackLocation, add: string, remove?: string): Promise<void> => {
     try {
@@ -194,7 +227,7 @@ export function createService(deps: ServiceDeps): Service {
       source,
       requestedHeadSha: pr.headSha,
     });
-    await react(source, REACTION.working);
+    await sourceStarted(source);
     void queue.add(() => processReview(rec.id, pr));
     return { started: true };
   }
@@ -266,7 +299,7 @@ export function createService(deps: ServiceDeps): Service {
       });
       if (superseded)
         log.info({ earlier: superseded.id }, 'same commit was already reviewed; not notifying twice');
-      await react(rec.source, REACTION.done, REACTION.working);
+      await sourceFinished(rec.source, true);
     } catch (err) {
       if (shutdownController.signal.aborted) {
         await store.update(reviewId, { status: 'queued' });
@@ -277,7 +310,7 @@ export function createService(deps: ServiceDeps): Service {
       const cause = err instanceof Error && err.cause ? errorMessage(err.cause) : undefined;
       log.error({ err: message, cause }, 'review failed');
       await store.update(reviewId, { status: 'failed', error: message });
-      await react(rec.source, REACTION.failed, REACTION.working);
+      await sourceFinished(rec.source, false);
       await slack
         .postMessage({
           channel: rec.source.channel,
@@ -513,6 +546,10 @@ export function createService(deps: ServiceDeps): Service {
     async handleMessage(msg) {
       if (!config.slack.watch_channels.includes(msg.channel)) return;
       if (!HANDLED_SUBTYPES.has(msg.subtype) || msg.botId || !msg.user || !msg.text) return;
+      if (config.slack.ignored_requesters.includes(msg.user)) {
+        logger.debug({ user: msg.user }, 'poster is in ignored_requesters; ignoring');
+        return;
+      }
       const requesters = config.slack.allowed_requesters;
       if (requesters.length > 0 && !requesters.includes(msg.user)) return;
       const source = { channel: msg.channel, ts: msg.ts };
