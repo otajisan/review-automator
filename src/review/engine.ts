@@ -34,6 +34,7 @@ export const BASE_ALLOWED_TOOLS = [
   'Bash(git ls-tree *)',
   'Bash(git cat-file *)',
   'Bash(git grep *)',
+  'Bash(grep *)',
 ] as const;
 
 /** Second line of defence behind the guard; also documents intent. Posting is done by the daemon. */

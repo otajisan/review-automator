@@ -63,7 +63,7 @@ conversation) and include:
 - `files`: the files they own (only when you split)
 - `conventions`: the `--conventions` paths, if any
 - intent: one or two lines from the PR title/description
-- that only plain read-only `git` commands, Read, Grep and Glob are available (no pipes or `&&`,
+- that only plain read-only `git` commands, `grep -rn` (not `-R`), Read, Grep and Glob are available (no pipes or `&&`,
   quote globs/braces, paths relative to the checkout)
 - `language`: the `--language` value, for their write-up
 

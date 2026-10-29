@@ -48,6 +48,28 @@ describe('Bash', () => {
     // Regex escapes inside double quotes, as reviewers write them (seen denied in real reviews):
     'git grep -n -E "class (ReportRow|ReportDto)\\b" -- src',
     'git grep -n "foo\\|bar" -- src/a.ts',
+    // Plain grep, as reviewers write it (seen denied in real reviews):
+    'grep -rn "MetricBasis\\|daily_total" src/a.ts src',
+    'grep -n "def \\|^class " "src/a.ts"',
+    "grep -rn --include='*.ts' 'TODO' .",
+    'grep -c x src/a.ts',
+    // Found by Codex: patterns are not paths, and options may follow the files.
+    "grep -n -e '/api/users' src/a.ts",
+    "grep -rn '../lib' src",
+    'grep -n name src/a.ts -i',
+    'grep -n name src/a.ts --',
+    'grep -eREADME src/a.ts',
+    'grep -e -R src/a.ts',
+    'grep -- -R src/a.ts',
+    'grep -F -fsrc/a.ts src',
+    "grep -n '#' src/a.ts",
+    'grep -rn -A2 --include="*.ts" x src',
+    // Found by Codex in the second round:
+    'grep -rn TODO',
+    'grep -r -A2 TODO',
+    'grep --recursive -n TODO',
+    'grep -n --context=2 x src/a.ts',
+    'grep -n --color x src/a.ts',
   ])('allows %s', (command) => {
     expect(bash(command)).toBe(true);
   });
@@ -103,6 +125,43 @@ describe('Bash', () => {
     // Found by Codex in the third round:
     ['.. after a committed symlink (the OS follows the link first)', 'git grep -f outside/../.env x'],
     ['a file argument hidden in a short-option cluster', 'git grep -nf/etc/hosts x -- src/a.ts'],
+    // Plain grep gets the same path checks as git:
+    ['grep on a file outside the checkout', 'grep -n root /etc/passwd'],
+    ['grep through a committed symlink', 'grep -n x outside/.ssh/id_ed25519'],
+    ['grep recursing from a committed symlinked directory', 'grep -rn x outside'],
+    ['grep with a parent-relative path', 'grep -rn x ../..'],
+    ['grep with a tilde path', 'grep -rn x ~/.ssh'],
+    ['grep with a pattern file outside the checkout', 'grep -f /etc/hosts src/a.ts'],
+    ['grep with an attached pattern file outside the checkout', 'grep -nf/etc/hosts src/a.ts'],
+    ['grep with an --exclude-from file outside the checkout', 'grep -r --exclude-from=/etc/hosts x .'],
+    ['grep with no file (it would read stdin)', 'grep -n x'],
+    ['grep following symlinks while recursing (-R)', 'grep -Rn x .'],
+    ['grep following symlinks while recursing (-S)', 'grep -rSn x .'],
+    ['grep following symlinks via the long option', 'grep --dereference-recursive x .'],
+    ['grep following symlinks via an abbreviated long option', 'grep --deref x .'],
+    ['grep with an unquoted glob', 'grep -n x src/*.ts'],
+    ['grep piped into another command', 'grep -rn x . | sh'],
+    ['other commands named like grep', 'egrep -rn x .'],
+    // Found by Codex: grep must never wait on stdin.
+    ['grep whose only operand is the pattern', 'grep -n src/a.ts'],
+    ['grep -e with no file', 'grep -e src/a.ts'],
+    ['grep -f with no file', 'grep -F -f src/a.ts'],
+    ['grep with - as a file', 'grep x - src/a.ts'],
+    ['grep -f reading stdin', 'grep -f - src/a.ts'],
+    ['grep -f- attached', 'grep -nf- src/a.ts'],
+    ['grep --file=- abbreviated', 'grep --fil=- src/a.ts'],
+    ['grep --exclude-from=-', 'grep -r --exclude-from=- x src'],
+    ['a shell comment hiding the file', 'grep -n x # src/a.ts'],
+    ['grep -D with an unknown action', 'grep -D skipx x src/a.ts'],
+    ['grep -d with an unknown action', 'grep --directories=follow x src'],
+    ['grep -m without its value', 'grep x src/a.ts -m'],
+    ['grep with no pattern', 'grep -n'],
+    // Found by Codex in the second round:
+    ['an abbreviation another grep reads as a different flag', 'grep --binary localhost /etc/hosts src/a.ts'],
+    ['an abbreviated long option', 'grep --line-num x src/a.ts'],
+    ['--context with a separate value (GNU and BSD disagree)', 'grep --context 2 src/a.ts src'],
+    ['a recursive grep switched back to reading directories', 'grep -r -d read TODO'],
+    ['grep with an unknown option', 'grep --mmap x src/a.ts'],
   ])('denies %s', (_name, command) => {
     expect(bash(command)).toBe(false);
   });

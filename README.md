@@ -153,8 +153,9 @@ can do.
   `PreToolUse` hook that runs before Claude Code's permission rules and also covers subagents:
   - Read / Grep / Glob only inside the checkout and the review's context directory (symlinks are
     resolved first), plus `~/.claude/{skills,agents,plugins}`
-  - Bash only for plain read-only `git` subcommands, with write/exec options such as `--output`,
-    `--no-index`, `--ext-diff`, `-c` rejected, and no pipes, `&&`, redirection or substitution
+  - Bash only for plain read-only `git` subcommands and `grep` (not `-R`, which follows symlinks out
+    of the checkout), with write/exec options such as `--output`, `--no-index`, `--ext-diff`, `-c`
+    rejected, and no pipes, `&&`, redirection or substitution
   - no file writes, web access, `gh`, or MCP tools (even if your own settings allow them), unless you
     list a tool in `per_repo.allowed_tools`
 - **Only the configured agents and skills.** The session may launch only `review.reviewers`,

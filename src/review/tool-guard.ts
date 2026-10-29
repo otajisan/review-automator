@@ -1,6 +1,7 @@
 import { lstatSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 import type { HookCallbackMatcher, HookJSONOutput } from '@anthropic-ai/claude-agent-sdk';
+import { parseGrepArgs } from './grep-args.js';
 
 /**
  * Every tool call in the review session — including subagents' — passes through this guard
@@ -75,9 +76,10 @@ const UNQUOTED_CONTROL = new Set([';', '&', '|', '<', '>', '(', ')', '$', '\\'])
  * Expansions that turn one word into other words. They are refused outside quotes for git commands:
  * `--{output=/x,stat}` becomes `--output=/x`, and `git diff *` expands a committed file named
  * `--output=...` into an option. zsh also expands `=cmd` to a path, and `~` to a home directory.
+ * A word starting with `#` begins a comment, which would hide the words the guard checked.
  */
 const UNQUOTED_EXPANSION = new Set(['{', '}', '*', '?', '[', ']']);
-const EXPANDING_WORD_START = new Set(['~', '=']);
+const EXPANDING_WORD_START = new Set(['~', '=', '#']);
 
 /**
  * Splits a command the way a POSIX shell would for simple words, honouring single and double
@@ -215,6 +217,14 @@ export function evaluateGit(tokens: readonly string[], ctx: GuardContext): Verdi
   return ALLOW;
 }
 
+/** Plain `grep`, which reviewers reach for out of habit. Files get the same path rules as git. */
+export function evaluateGrep(tokens: readonly string[], ctx: GuardContext): Verdict {
+  const parsed = parseGrepArgs(tokens.slice(1));
+  if (!parsed.ok) return deny(parsed.reason);
+  const outside = [...parsed.files, ...parsed.optionFiles].find((f) => escapesCheckout(f, ctx));
+  return outside ? deny(`${outside} is outside the review checkout; use paths inside it`) : ALLOW;
+}
+
 /** `Bash(python3 /x/match.py *)` matches `python3 /x/match.py --base origin/main`. */
 export function bashRuleMatches(rule: string, command: string): boolean {
   const m = /^Bash\((.*)\)$/.exec(rule);
@@ -236,14 +246,16 @@ export function evaluateBash(command: string, ctx: GuardContext): Verdict {
   }
   // Operator-approved commands may use `~` paths and globs; chaining was already refused above.
   if (ctx.extraRules.some((rule) => bashRuleMatches(rule, trimmed))) return ALLOW;
-  if (loose[0] !== 'git') return deny(`${loose[0]} is not allowed; only read-only git commands can run`);
+  if (loose[0] !== 'git' && loose[0] !== 'grep') {
+    return deny(`${loose[0]} is not allowed; only read-only git commands and grep can run`);
+  }
   const tokens = tokenize(trimmed, { strict: true });
   if (!tokens) {
     return deny(
       "quote glob patterns and braces, e.g. git grep -n 'x' -- '*.ts'; unquoted shell expansion is not allowed",
     );
   }
-  return evaluateGit(tokens, ctx);
+  return tokens[0] === 'grep' ? evaluateGrep(tokens, ctx) : evaluateGit(tokens, ctx);
 }
 
 function resolveReal(p: string): string {
