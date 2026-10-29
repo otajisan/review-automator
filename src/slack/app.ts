@@ -80,6 +80,8 @@ export function createSlackApp(opts: {
     appToken: opts.appToken,
     socketMode: true,
     logLevel: LogLevel.WARN,
+    // The default retries a failing call for about half an hour; a few quick retries are enough here.
+    clientOptions: { retryConfig: { retries: 3 }, timeout: 30_000 },
   });
   const log = opts.logger.child({ component: 'slack' });
 

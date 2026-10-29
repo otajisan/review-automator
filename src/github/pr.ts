@@ -177,7 +177,7 @@ const OwnerReviewSchema = z.object({ user: z.string(), state: z.string(), commit
  */
 export async function ownerApprovedHead(
   gh: Gh,
-  ref: PrRef,
+  ref: PrRef & { readonly baseRef: string },
   login: string,
   headSha: string,
 ): Promise<boolean> {
@@ -195,5 +195,74 @@ export async function ownerApprovedHead(
     .filter((r) => r.user.toLowerCase() === login.toLowerCase())
     .filter((r) => r.state === 'APPROVED' || r.state === 'CHANGES_REQUESTED' || r.state === 'DISMISSED');
   const latest = decisive.at(-1); // the API lists reviews in submission order
-  return latest?.state === 'APPROVED' && latest.commit_id === headSha;
+  if (latest?.state !== 'APPROVED' || !latest.commit_id) return false;
+  if (latest.commit_id === headSha) return true;
+  // Commits after the approval that only merge the base branch in ("Update branch") do not change
+  // what was approved, so the approval still stands — but a merge can also carry real changes
+  // (a conflict resolution, an edit made while committing it). So the PR's own changes against
+  // the base must be identical at the approved commit and at head.
+  if (!(await onlyMergeCommitsBetween(gh, ref, latest.commit_id, headSha))) return false;
+  const [approved, current] = await Promise.all([
+    prChanges(gh, ref, ref.baseRef, latest.commit_id),
+    prChanges(gh, ref, ref.baseRef, headSha),
+  ]);
+  return approved !== null && approved === current;
+}
+
+const CompareFilesSchema = z.object({
+  n: z.number(),
+  files: z.array(z.object({ filename: z.string(), status: z.string(), patch: z.string().nullish() })),
+});
+
+/** The compare API lists at most this many files; with more, the list is incomplete. */
+const COMPARE_MAX_FILES = 300;
+
+/**
+ * The PR's changes at `sha` relative to its merge base with `baseRef`: per file, the added and
+ * removed lines (hunk headers and context dropped, so a base branch moving underneath does not
+ * count as a change). Null when that cannot be established: binary or oversized files have no
+ * patch, and very large diffs are truncated.
+ */
+async function prChanges(gh: Gh, ref: PrRef, baseRef: string, sha: string): Promise<string | null> {
+  const out = await gh.run([
+    'api',
+    `repos/${ref.owner}/${ref.repo}/compare/${baseRef}...${sha}`,
+    '--jq',
+    '{n: (.files | length), files: [.files[] | {filename, status, patch}]}',
+  ]);
+  const c = CompareFilesSchema.parse(JSON.parse(out));
+  if (c.n >= COMPARE_MAX_FILES) return null;
+  const parts: string[] = [];
+  for (const f of [...c.files].sort((a, b) => a.filename.localeCompare(b.filename))) {
+    if (typeof f.patch !== 'string') return null;
+    const changed = f.patch.split('\n').filter((l) => l.startsWith('+') || l.startsWith('-'));
+    parts.push([f.filename, f.status, ...changed].join('\n'));
+  }
+  return parts.join('\n\0\n');
+}
+
+const PrCommitSchema = z.object({ sha: z.string(), parents: z.number() });
+
+/**
+ * True when every commit of the PR after `from` is a merge commit (the base branch merged in) and
+ * the last one is `head`. Uses the PR's own commit list, which contains those merge commits but not
+ * the base-branch commits they bring in; a plain compare would list those too.
+ */
+async function onlyMergeCommitsBetween(gh: Gh, ref: PrRef, from: string, head: string): Promise<boolean> {
+  const out = await gh.run([
+    'api',
+    '--paginate',
+    `repos/${ref.owner}/${ref.repo}/pulls/${ref.number}/commits`,
+    '--jq',
+    '.[] | {sha, parents: (.parents | length)}',
+  ]);
+  const commits = out
+    .split('\n')
+    .filter((line) => line.trim().length > 0)
+    .map((line) => PrCommitSchema.parse(JSON.parse(line)));
+  const at = commits.findIndex((c) => c.sha === from);
+  // Not found: history was rewritten (force-push), or the list is truncated (GitHub caps it at 250).
+  if (at === -1) return false;
+  const after = commits.slice(at + 1);
+  return after.length > 0 && after.at(-1)?.sha === head && after.every((c) => c.parents >= 2);
 }

@@ -18,12 +18,13 @@ import {
   fetchDiffForComments,
   isRepoAllowed,
   prSlug,
+  prUrl,
   type PrInfo,
   fetchMergeBase,
   ownerApprovedHead,
   type PrRef,
 } from './github/pr.js';
-import { errorMessage } from './lib/errors.js';
+import { errorMessage, ReviewError } from './lib/errors.js';
 import { createKeyedLock } from './lib/keyed-lock.js';
 import { findSecretLike } from './lib/secrets.js';
 import type { Logger } from './lib/logger.js';
@@ -32,6 +33,8 @@ import type { ReviewOutcome } from './review/run-review.js';
 import {
   ACTIONS,
   escapeMrkdwn,
+  prMention,
+  startedText,
   notificationBlocks,
   notificationText,
   postedOutcome,
@@ -89,6 +92,10 @@ const REACTION = { working: 'eyes', done: 'white_check_mark', failed: 'x' } as c
 /** Statuses of a record whose result is (or was) in front of the owner. */
 const LIVE_RESULT = new Set<ReviewRecord['status']>(['notified', 'posting', 'posted']);
 const MAX_ERROR_CHARS = 500;
+/** Ignore patterns only look at the start of a message; announcements are short. */
+const MAX_PATTERN_INPUT = 4000;
+/** How long a review waits for its "started" message before going ahead without it. */
+const START_NOTICE_WAIT_MS = 15_000;
 /** How long a POST with an unknown outcome is given to show up on GitHub before a retry is allowed. */
 const POST_RECONCILE_GRACE_MS = 60_000;
 
@@ -133,6 +140,22 @@ export function createService(deps: ServiceDeps): Service {
       logger.warn({ pr: prSlug(ref), step, err: errorMessage(err) }, 'PR diff unavailable; falling back'),
     );
 
+  const ignorePatterns = config.slack.ignore_message_patterns.map((p) => new RegExp(p, 'i'));
+
+  /**
+   * Announcements such as "merging this" are not review requests. Links are removed first so that
+   * a repository or branch name inside a URL (".../merge-tool/pull/1") cannot match by accident.
+   */
+  function matchesIgnoredPattern(text: string): boolean {
+    if (ignorePatterns.length === 0) return false;
+    const withoutLinks = text
+      .slice(0, MAX_PATTERN_INPUT)
+      .replace(/<[^>]*>/g, ' ') // Slack-formatted links: <https://...|label>
+      .replace(/\S*:\/\/\S+/g, ' ') // anything with a scheme
+      .replace(/\b[\w-]+(?:\.[\w-]+)+\/\S*/g, ' '); // host/path without a scheme: github.com/acme/release-tool
+    return ignorePatterns.some((re) => re.test(withoutLinks));
+  }
+
   /** Why a linked PR should not be reviewed, or null if it should. */
   async function skipReason(pr: PrInfo): Promise<string | null> {
     if (pr.state !== 'OPEN') return `PR is ${pr.state.toLowerCase()}`;
@@ -162,12 +185,16 @@ export function createService(deps: ServiceDeps): Service {
   interface SourceState {
     readonly pending: number;
     readonly failed: boolean;
+    /** At least one review of this message produced a result. */
+    readonly succeeded: boolean;
     readonly reading: boolean;
     readonly eyes: boolean;
   }
+  /** How one review of a message ended. `skipped`: dropped before reviewing (e.g. merged meanwhile). */
+  type ReviewEnd = 'ok' | 'failed' | 'skipped';
   const sourceProgress = new Map<string, SourceState>();
   const sourceKey = (loc: SlackLocation): string => `${loc.channel}:${loc.ts}`;
-  const IDLE: SourceState = { pending: 0, failed: false, reading: false, eyes: false };
+  const IDLE: SourceState = { pending: 0, failed: false, succeeded: false, reading: false, eyes: false };
 
   /** Puts the final reaction once nothing is running or still being read. */
   async function settle(loc: SlackLocation, state: SourceState): Promise<void> {
@@ -176,13 +203,12 @@ export function createService(deps: ServiceDeps): Service {
       return;
     }
     sourceProgress.delete(sourceKey(loc));
-    // Nothing was started and nothing failed (e.g. only merged PRs): leave the message alone.
-    if (!state.eyes && !state.failed) return;
-    await react(
-      loc,
-      state.failed ? REACTION.failed : REACTION.done,
-      state.eyes ? REACTION.working : undefined,
-    );
+    const remove = state.eyes ? REACTION.working : undefined;
+    if (state.failed) await react(loc, REACTION.failed, remove);
+    else if (state.succeeded) await react(loc, REACTION.done, remove);
+    // Everything skipped (e.g. merged while queued): take 👀 off and claim nothing.
+    else if (remove && config.slack.react_to_requests)
+      await slack.removeReaction({ ...loc, name: remove }).catch(() => undefined);
   }
 
   async function sourceStarted(loc: SlackLocation): Promise<void> {
@@ -191,14 +217,19 @@ export function createService(deps: ServiceDeps): Service {
     if (!state.eyes) await react(loc, REACTION.working);
   }
 
-  async function sourceFinished(loc: SlackLocation, ok: boolean): Promise<void> {
-    const state = sourceProgress.get(sourceKey(loc));
-    if (!state) {
-      // Started before a restart: nothing to aggregate with, so report this review alone.
-      await react(loc, ok ? REACTION.done : REACTION.failed, REACTION.working);
-      return;
-    }
-    await settle(loc, { ...state, pending: state.pending - 1, failed: state.failed || !ok });
+  async function sourceFinished(loc: SlackLocation, end: ReviewEnd): Promise<void> {
+    const state = sourceProgress.get(sourceKey(loc)) ?? {
+      // Started before a restart: nothing to aggregate with, so this review settles alone.
+      ...IDLE,
+      pending: 1,
+      eyes: true,
+    };
+    await settle(loc, {
+      ...state,
+      pending: state.pending - 1,
+      failed: state.failed || end === 'failed',
+      succeeded: state.succeeded || end === 'ok',
+    });
   }
 
   /** Starts a review for every eligible PR linked in one message; reactions settle once at the end. */
@@ -222,6 +253,13 @@ export function createService(deps: ServiceDeps): Service {
         } catch (err) {
           logger.warn({ pr: prSlug(ref), err: errorMessage(err) }, 'could not start review');
           linkFailed = true;
+          // With reactions off this is the only trace of the request, so tell the owner.
+          await slack
+            .postMessage({
+              channel: config.slack.notify_channel,
+              text: `:x: Could not start a review of <${prUrl(ref)}|${escapeMrkdwn(prSlug(ref))}>:\n${slackError(errorMessage(err))}`,
+            })
+            .catch(() => undefined);
         }
       }
     } finally {
@@ -232,6 +270,7 @@ export function createService(deps: ServiceDeps): Service {
 
   /** Slack hiccups must never fail a review, so reactions are best effort. */
   const react = async (loc: SlackLocation, add: string, remove?: string): Promise<void> => {
+    if (!config.slack.react_to_requests) return;
     try {
       if (remove) await slack.removeReaction({ ...loc, name: remove }).catch(() => undefined);
       await slack.addReaction({ ...loc, name: add });
@@ -309,12 +348,65 @@ export function createService(deps: ServiceDeps): Service {
     return { channel: config.slack.notify_channel, ts: posted.ts };
   }
 
+  /** Tells the owner a review is under way. Best effort: a Slack hiccup must not stop the review. */
+  async function announceStart(reviewId: string): Promise<void> {
+    const rec = await store.get(reviewId);
+    if (!rec) return;
+    const posting = slack
+      .postMessage({
+        channel: config.slack.notify_channel,
+        text: startedText(rec, config.slack.started_message),
+      })
+      .then(async (posted) => {
+        await store.update(reviewId, {
+          startNotice: { channel: config.slack.notify_channel, ts: posted.ts },
+        });
+      })
+      .catch((err: unknown) =>
+        logger.warn({ reviewId, err: errorMessage(err) }, 'could not post the start message'),
+      );
+    // During a Slack outage the client keeps retrying; the review does not wait for that.
+    let timer: NodeJS.Timeout | undefined;
+    const giveUp = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, START_NOTICE_WAIT_MS);
+    });
+    await Promise.race([posting, giveUp]);
+    clearTimeout(timer);
+  }
+
+  /** A follow-up about a review, in the thread of its start message (or the notify channel). */
+  async function threadNote(reviewId: string, text: string): Promise<void> {
+    const rec = await store.get(reviewId);
+    await slack
+      .postMessage({
+        channel: config.slack.notify_channel,
+        text: rec ? `${prMention(rec)}: ${text}` : text,
+        ...(rec?.startNotice ? { threadTs: rec.startNotice.ts } : {}),
+      })
+      .catch((err: unknown) => logger.warn({ reviewId, err: errorMessage(err) }, 'could not post to Slack'));
+  }
+
   async function processReview(reviewId: string, knownPr?: PrInfo): Promise<void> {
     const rec = await store.transition(reviewId, ['queued'], 'running');
     if (!rec) return;
     const log = logger.child({ reviewId, pr: prSlug(rec.pr) });
     try {
-      const pr = knownPr ?? (await fetchPr(gh, rec.pr));
+      // Re-check now rather than trusting the state seen when the link was posted: the review may
+      // have waited in the queue while the PR was merged or approved.
+      const pr = await fetchPr(gh, rec.pr).catch((err: unknown) => {
+        if (knownPr) return knownPr;
+        throw err;
+      });
+      const skip = await skipReason(pr);
+      if (skip) {
+        const skipped = await store.update(reviewId, { status: 'skipped', error: `skipped: ${skip}` });
+        // Resumed after a restart, a review may already have announced itself: close that thread.
+        if (skipped.startNotice) await threadNote(reviewId, `Stopped: ${escapeMrkdwn(skip)}.`);
+        log.info({ reason: skip }, 'not reviewing this PR after all');
+        await sourceFinished(rec.source, 'skipped');
+        return;
+      }
+      await announceStart(reviewId);
       const outcome = await deps.review(rec.pr, reviewId, { pr, signal: shutdownController.signal });
       const reviewed = await store.update(reviewId, {
         headSha: outcome.headSha,
@@ -341,27 +433,35 @@ export function createService(deps: ServiceDeps): Service {
         await store.update(reviewId, { status: 'notified', notification });
         return undefined;
       });
-      if (superseded)
+      if (superseded) {
         log.info({ earlier: superseded.id }, 'same commit was already reviewed; not notifying twice');
-      await sourceFinished(rec.source, true);
+        await threadNote(
+          reviewId,
+          'This commit was already reviewed by an earlier request; see that notification.',
+        );
+      }
+      await sourceFinished(rec.source, 'ok');
     } catch (err) {
       if (shutdownController.signal.aborted) {
         await store.update(reviewId, { status: 'queued' });
         log.info('review interrupted by shutdown; will resume on next start');
         return;
       }
+      if (err instanceof ReviewError && err.kind === 'pr_not_open') {
+        // Merged or closed while waiting: nothing went wrong, so no ❌ and no error reply.
+        await store.update(reviewId, { status: 'skipped', error: err.message });
+        log.info({ reason: err.message }, 'not reviewing this PR after all');
+        await threadNote(reviewId, `Stopped: ${escapeMrkdwn(err.message)}.`);
+        await sourceFinished(rec.source, 'skipped');
+        return;
+      }
       const message = errorMessage(err);
       const cause = err instanceof Error && err.cause ? errorMessage(err.cause) : undefined;
       log.error({ err: message, cause }, 'review failed');
       await store.update(reviewId, { status: 'failed', error: message });
-      await sourceFinished(rec.source, false);
-      await slack
-        .postMessage({
-          channel: rec.source.channel,
-          threadTs: rec.source.ts,
-          text: `:x: Automated review failed:\n${slackError(message)}`,
-        })
-        .catch(() => undefined);
+      await sourceFinished(rec.source, 'failed');
+      // Reported in the owner's notify channel, not in the channel where the PR was shared.
+      await threadNote(reviewId, `:x: Review failed:\n${slackError(message)}`);
     }
   }
 
@@ -590,12 +690,20 @@ export function createService(deps: ServiceDeps): Service {
     async handleMessage(msg) {
       if (!config.slack.watch_channels.includes(msg.channel)) return;
       if (!HANDLED_SUBTYPES.has(msg.subtype) || msg.botId || !msg.user || !msg.text) return;
+      // Cheap checks on the poster come before running operator-supplied regular expressions.
       if (config.slack.ignored_requesters.includes(msg.user)) {
         logger.debug({ user: msg.user }, 'poster is in ignored_requesters; ignoring');
         return;
       }
       const requesters = config.slack.allowed_requesters;
       if (requesters.length > 0 && !requesters.includes(msg.user)) return;
+      if (matchesIgnoredPattern(msg.text)) {
+        logger.info(
+          { channel: msg.channel, ts: msg.ts },
+          'message matches ignore_message_patterns; ignoring',
+        );
+        return;
+      }
       await startLinkedReviews(msg.text, msg.user, { channel: msg.channel, ts: msg.ts });
     },
 

@@ -41,6 +41,15 @@ export async function runReview(
   if (pr.state !== 'OPEN') throw new ReviewError('pr_not_open', `${prSlug(pr)} is ${pr.state.toLowerCase()}`);
 
   const ws = await deps.workspace.prepare(pr, reviewId);
+  // Preparing a large repository can take minutes; the PR may have been merged meanwhile.
+  const latest = await fetchPr(deps.gh, pr).catch(() => pr);
+  if (latest.state !== 'OPEN') {
+    await deps.workspace.cleanup(ws).catch(() => undefined);
+    throw new ReviewError(
+      'pr_not_open',
+      `${prSlug(pr)} was ${latest.state.toLowerCase()} while preparing the review`,
+    );
+  }
   const log = logger.child({ reviewId, pr: prSlug(pr), head: ws.headSha.slice(0, 7) });
   let failed = true;
   try {

@@ -84,6 +84,30 @@ describe('runReview', () => {
     expect(d.workspace.cleanup).toHaveBeenCalledWith(ws, { keep: true });
   });
 
+  it('stops and cleans up if the PR was merged while the workspace was prepared', async () => {
+    const d = deps(queryReturning({ complete: true, summary: '', findings: [] }));
+    const merged = { state: 'MERGED' };
+    const gh = {
+      json: () =>
+        Promise.resolve({
+          ...testPr(),
+          ...merged,
+          url: 'u',
+          isDraft: false,
+          author: { login: 'a' },
+          headRefOid: HEAD_SHA,
+          baseRefName: 'main',
+          body: '',
+        }),
+      run: () => Promise.resolve(''),
+    } as unknown as Gh;
+
+    await expect(runReview({ ...d, gh }, testPr(), 'r1', { pr: testPr() })).rejects.toMatchObject({
+      kind: 'pr_not_open',
+    });
+    expect(d.workspace.cleanup).toHaveBeenCalled();
+  });
+
   it('refuses closed PRs before touching the workspace', async () => {
     const d = deps(queryReturning({ complete: true, summary: '', findings: [] }));
 

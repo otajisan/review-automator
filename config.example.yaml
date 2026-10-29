@@ -18,6 +18,15 @@ slack:
   allowed_requesters: []
   # Whose posts never trigger a review, e.g. your own member ID. Wins over allowed_requesters.
   ignored_requesters: []
+  # Posted to notify_channel when a review starts; {pr} becomes a link to the PR.
+  started_message: 'Started reviewing {pr}'
+  # Put 👀 / ✅ / ❌ on the request message. Off by default: others in the channel may read them as a
+  # verdict on the PR.
+  react_to_requests: false
+  # Messages matching any of these regular expressions (case-insensitive, links removed first) are
+  # not review requests, e.g. merge/release announcements that link an already approved PR.
+  # ignore_message_patterns: ['マージします', 'リリースします', '\bmerg(e|ing)\b', '\breleas(e|ing)\b']
+  ignore_message_patterns: []
 
 github:
   # Only PRs in these repositories are reviewed. Globs over owner/repo, case-insensitive.
