@@ -58,6 +58,36 @@ describe('parseConfig', () => {
     expect(() => parseConfig('owner: [unclosed')).toThrow(/not valid YAML/);
   });
 
+  it('rejects an ignore_message_patterns entry that is not a valid regular expression', () => {
+    const yaml = MINIMAL_YAML.replace(
+      '  notify_channel: C0456EFGH',
+      "  notify_channel: C0456EFGH\n  ignore_message_patterns: ['(unclosed']",
+    );
+
+    expect(() => parseConfig(yaml)).toThrow(/ignore_message_patterns.*not a valid regular expression/s);
+  });
+
+  it('rejects ignore_message_patterns with nested quantifiers that could hang the daemon', () => {
+    for (const pattern of ['^(a+)+$', '(\\w*)*', '(x+){2,}']) {
+      const yaml = MINIMAL_YAML.replace(
+        '  notify_channel: C0456EFGH',
+        // A function replacement, so the `$'` in a pattern is not read as a replacement token.
+        () => `  notify_channel: C0456EFGH\n  ignore_message_patterns: ['${pattern}']`,
+      );
+
+      expect(() => parseConfig(yaml)).toThrow(/nested quantifiers/);
+    }
+  });
+
+  it('accepts ordinary ignore_message_patterns', () => {
+    const yaml = MINIMAL_YAML.replace(
+      '  notify_channel: C0456EFGH',
+      "  notify_channel: C0456EFGH\n  ignore_message_patterns: ['マージします', '\\bmerg(e|ing)\\b', '(foo)+']",
+    );
+
+    expect(parseConfig(yaml).slack.ignore_message_patterns).toHaveLength(3);
+  });
+
   it('accepts per-repo extra skills and tool rules', () => {
     const yaml = `${MINIMAL_YAML}
 review:

@@ -16,6 +16,7 @@ import { fakeSlack } from './helpers/fake-slack.js';
 import { BASE_SHA, finding, HEAD_SHA, silentLogger, testConfig, testPr } from './helpers/fixtures.js';
 
 const OWNER = 'U0OWNER01';
+const REACTIONS_ON = 'slack: { react_to_requests: true }';
 const URL = 'https://github.com/acme/api/pull/7';
 const DIFF = `diff --git a/src/a.ts b/src/a.ts
 --- a/src/a.ts
@@ -32,6 +33,16 @@ interface World {
   viewDelayMs: Record<number, number>;
   viewFails: number[];
   mergedNumbers: number[];
+  /** PR is reported MERGED from this many `gh pr view` calls on (models a merge while queued). */
+  mergedAfterViews?: number;
+  views: number;
+  /** The PR's own commits (pulls/{n}/commits), oldest first. */
+  prCommits: { sha: string; parents: number }[];
+  /** compare/{base}...{sha} file list per commit sha (n defaults to the list length). */
+  prFiles: Record<
+    string,
+    { n?: number; files: { filename: string; status: string; patch: string | null }[] }
+  >;
   findings: Finding[];
   apiFailures: number;
   /** stderr of a failing POST; a non-4xx message means the outcome is unknown. */
@@ -54,6 +65,9 @@ async function setup(
     viewDelayMs: {},
     viewFails: [],
     mergedNumbers: [],
+    views: 0,
+    prCommits: [],
+    prFiles: {},
     apiFailures: 0,
     apiFailStderr: 'HTTP 422: Unprocessable Entity',
     apiFailCreates: false,
@@ -70,11 +84,13 @@ async function setup(
         const delay = world.viewDelayMs[n] ?? 0;
         if (delay > 0) await new Promise((r) => setTimeout(r, delay));
         if (world.viewFails.includes(n)) return { exitCode: 1, stderr: 'HTTP 404: Not Found' };
+        world.views += 1;
+        const mergedNow = world.mergedAfterViews !== undefined && world.views >= world.mergedAfterViews;
         return JSON.stringify({
           number: n,
           url: `https://github.com/acme/api/pull/${n}`,
           title: world.pr.title,
-          state: world.mergedNumbers.includes(n) ? 'MERGED' : world.pr.state,
+          state: world.mergedNumbers.includes(n) || mergedNow ? 'MERGED' : world.pr.state,
           isDraft: world.pr.isDraft,
           author: { login: world.pr.author },
           headRefOid: world.pr.headSha,
@@ -87,7 +103,19 @@ async function setup(
       argsStartWith('pr', 'diff'),
       () => (world.diffFails ? { exitCode: 1, stderr: 'HTTP 406: diff too large' } : DIFF),
     ],
-    [(c) => c.args[0] === 'api' && String(c.args[1]).includes('/compare/'), () => `${world.mergeBase}\n`],
+    [
+      (c) => c.args[0] === 'api' && String(c.args[1]).includes('/compare/'),
+      (c) => {
+        if (!String(c.args[3]).includes('files')) return `${world.mergeBase}\n`;
+        const sha = String(c.args[1]).split('...').at(-1) ?? '';
+        const entry = world.prFiles[sha] ?? { files: [] };
+        return JSON.stringify({ n: entry.n ?? entry.files.length, files: entry.files });
+      },
+    ],
+    [
+      (c) => c.args[0] === 'api' && c.args[1] === '--paginate' && String(c.args[2]).endsWith('/commits'),
+      () => world.prCommits.map((c) => JSON.stringify(c)).join('\n'),
+    ],
     [
       (c) => c.args[0] === 'api' && c.args[1] === '--paginate' && String(c.args[2]).endsWith('/reviews'),
       () => world.existingReviews.join('\n'),
@@ -154,7 +182,7 @@ const idOf = (value: string): string => value.split(':')[0] ?? '';
 async function reviewed(s: Awaited<ReturnType<typeof setup>>) {
   await s.service.handleMessage(message());
   await s.service.idle();
-  const note = s.slack.of('postMessage').find((m) => m['channel'] === 'C0NOTIFY1');
+  const note = s.slack.of('postMessage').find((m) => m['channel'] === 'C0NOTIFY1' && m['blocks']);
   // The button value is `<reviewId>:<nonce>`; tests pass it back exactly as Slack would.
   const value = JSON.stringify(note).match(/"value":"([a-z0-9-]+:[a-f0-9]*)"/)?.[1];
   if (!value) throw new Error('no notification posted');
@@ -167,8 +195,45 @@ describe('handleMessage', () => {
 
     await reviewed(s);
 
-    const note = s.slack.of('postMessage').find((m) => m['channel'] === 'C0NOTIFY1');
-    expect(String(note?.['text'])).toContain(`<@${OWNER}>`);
+    const notify = s.slack.of('postMessage').filter((m) => m['channel'] === 'C0NOTIFY1');
+    expect(String(notify[0]?.['text'])).toMatch(
+      /^Started reviewing <https:\/\/github\.com\/acme\/api\/pull\/7\|/,
+    );
+    expect(String(notify[1]?.['text'])).toContain(`<@${OWNER}>`);
+    // Nothing is written to the channel where the PR was shared: no reactions, no replies.
+    expect(s.slack.of('addReaction')).toEqual([]);
+    expect(s.slack.of('postMessage').filter((m) => m['channel'] === 'C0WATCH01')).toEqual([]);
+  });
+
+  it('says why in the start thread when the PR is merged while the review is being prepared', async () => {
+    const s = await setup({
+      review: () =>
+        Promise.reject(new ReviewError('pr_not_open', 'acme/api#7 was merged while preparing the review')),
+    });
+
+    await s.service.handleMessage(message());
+    await s.service.idle();
+
+    const [start, reply] = s.slack.of('postMessage');
+    expect(String(start?.['text'])).toMatch(/^Started reviewing/);
+    expect(reply).toMatchObject({ channel: 'C0NOTIFY1', threadTs: '1001.000' });
+    expect(String(reply?.['text'])).toMatch(/Stopped: acme\/api#7 was merged while preparing the review/);
+    expect(String(reply?.['text'])).not.toMatch(/failed/);
+  });
+
+  it('uses started_message as a template for the start message', async () => {
+    const s = await setup({ configYaml: "slack: { started_message: '{pr} のレビューを開始しました' }" });
+
+    await reviewed(s);
+
+    expect(String(s.slack.of('postMessage')[0]?.['text'])).toMatch(/> Add feature のレビューを開始しました$/);
+  });
+
+  it('adds reactions to the request only when react_to_requests is on', async () => {
+    const s = await setup({ configYaml: 'slack: { react_to_requests: true }' });
+
+    await reviewed(s);
+
     expect(s.slack.of('addReaction').map((r) => r['name'])).toEqual(['eyes', 'white_check_mark']);
   });
 
@@ -229,7 +294,9 @@ describe('handleMessage', () => {
     await s.service.handleMessage(message());
     await s.service.idle();
 
-    const reply = String(s.slack.of('postMessage').find((m) => m['threadTs'] === '100.1')?.['text']);
+    const reply = String(
+      s.slack.of('postMessage').find((m) => String(m['text']).includes('Review failed'))?.['text'],
+    );
     expect(reply).not.toContain('<!channel>');
     expect(reply).toContain('&lt;!channel&gt;');
   });
@@ -255,7 +322,7 @@ describe('handleMessage', () => {
     expect(s.review).not.toHaveBeenCalled();
   });
 
-  it('marks the request failed and replies in thread when the review fails', async () => {
+  it('reports a failed review in the thread of its start message, in the notify channel', async () => {
     const s = await setup({
       review: () => Promise.reject(new ReviewError('timeout', 'review timed out after 20 minutes')),
     });
@@ -263,10 +330,12 @@ describe('handleMessage', () => {
     await s.service.handleMessage(message());
     await s.service.idle();
 
-    const reply = s.slack.of('postMessage').find((m) => m['threadTs'] === '100.1');
-    expect(reply?.['text']).toMatch(/timed out/);
-    expect(s.slack.of('addReaction').map((r) => r['name'])).toContain('x');
-    expect(s.slack.of('postMessage').some((m) => m['channel'] === 'C0NOTIFY1')).toBe(false);
+    const [start, reply] = s.slack.of('postMessage');
+    expect(start?.['channel']).toBe('C0NOTIFY1');
+    expect(reply).toMatchObject({ channel: 'C0NOTIFY1', threadTs: '1001.000' });
+    expect(String(reply?.['text'])).toMatch(/Review failed:[\s\S]*timed out/);
+    expect(s.slack.of('postMessage').some((m) => m['blocks'])).toBe(false);
+    expect(s.slack.of('addReaction')).toEqual([]);
   });
 });
 
@@ -280,11 +349,13 @@ describe('several PRs in one message', () => {
     await s.service.idle();
 
     expect(s.review).toHaveBeenCalledTimes(2);
-    expect(s.slack.of('postMessage').filter((m) => m['channel'] === 'C0NOTIFY1')).toHaveLength(2);
+    expect(s.slack.of('postMessage').filter((m) => m['channel'] === 'C0NOTIFY1' && m['blocks'])).toHaveLength(
+      2,
+    );
   });
 
   it('keeps 👀 until every PR is done, then shows one result', async () => {
-    const s = await setup();
+    const s = await setup({ configYaml: REACTIONS_ON });
 
     await s.service.handleMessage(twoLinks());
     await s.service.idle();
@@ -296,7 +367,10 @@ describe('several PRs in one message', () => {
   });
 
   it('does not settle early when the first review fails before the next link is read', async () => {
-    const s = await setup({ review: () => Promise.reject(new Error('fails at once')) });
+    const s = await setup({
+      review: () => Promise.reject(new Error('fails at once')),
+      configYaml: REACTIONS_ON,
+    });
     s.world.viewDelayMs = { 8: 50 }; // PR #8 is looked up slowly
 
     await s.service.handleMessage(twoLinks());
@@ -319,7 +393,7 @@ describe('several PRs in one message', () => {
   });
 
   it('shows ❌ when one link cannot even be looked up', async () => {
-    const s = await setup();
+    const s = await setup({ configYaml: REACTIONS_ON });
     s.world.viewFails = [8];
 
     await s.service.handleMessage(twoLinks());
@@ -329,9 +403,21 @@ describe('several PRs in one message', () => {
     expect(s.review).toHaveBeenCalledTimes(1);
   });
 
+  it('tells the owner in the notify channel when a link cannot be looked up', async () => {
+    const s = await setup();
+    s.world.viewFails = [8];
+
+    await s.service.handleMessage(twoLinks());
+    await s.service.idle();
+
+    const notice = s.slack.of('postMessage').find((m) => /Could not start a review/.test(String(m['text'])));
+    expect(notice?.['channel']).toBe('C0NOTIFY1');
+  });
+
   it('shows ❌ (not ✅ and ❌) when one of the PRs fails', async () => {
     let n = 0;
     const s = await setup({
+      configYaml: REACTIONS_ON,
       review: (_ref, _id, o) => {
         n += 1;
         if (n === 2) return Promise.reject(new Error('boom'));
@@ -397,6 +483,146 @@ describe('which PRs are reviewed', () => {
     await linkPosted(s);
 
     expect(s.review).toHaveBeenCalledTimes(1);
+  });
+
+  const APPROVED_SHA = '9'.repeat(40);
+  const commit = (sha: string, parents: number) => ({ sha, parents });
+
+  const file = (patch: string | null) => ({ filename: 'src/a.ts', status: 'modified', patch });
+  const onlyMergesAfterApproval = (s: Awaited<ReturnType<typeof setup>>) => {
+    s.world.existingReviews = [approval('APPROVED', APPROVED_SHA)];
+    s.world.prCommits = [
+      commit('a'.repeat(40), 1),
+      commit(APPROVED_SHA, 1),
+      commit('b'.repeat(40), 2),
+      commit(HEAD_SHA, 2),
+    ];
+  };
+
+  it('still skips when only base-branch merges came after the approval', async () => {
+    const s = await setup();
+    onlyMergesAfterApproval(s);
+    // Same PR changes; only hunk positions moved because the base branch moved underneath.
+    s.world.prFiles = {
+      [APPROVED_SHA]: { files: [file('@@ -1,2 +1,3 @@\n a\n+b\n c')] },
+      [HEAD_SHA]: { files: [file('@@ -10,2 +10,3 @@\n a\n+b\n c')] },
+    };
+
+    await linkPosted(s);
+
+    expect(s.review).not.toHaveBeenCalled();
+  });
+
+  it('reviews when a merge commit carried a real change (e.g. a conflict resolution)', async () => {
+    const s = await setup();
+    onlyMergesAfterApproval(s);
+    s.world.prFiles = {
+      [APPROVED_SHA]: { files: [file('@@ -1,2 +1,3 @@\n a\n+b\n c')] },
+      [HEAD_SHA]: { files: [file('@@ -1,2 +1,3 @@\n a\n+b2\n c')] },
+    };
+
+    await linkPosted(s);
+
+    expect(s.review).toHaveBeenCalledTimes(1);
+  });
+
+  it('reviews when the changes cannot be compared (binary file, or too many files)', async () => {
+    for (const files of [
+      { [APPROVED_SHA]: { files: [file(null)] }, [HEAD_SHA]: { files: [file(null)] } },
+      { [APPROVED_SHA]: { n: 300, files: [] }, [HEAD_SHA]: { n: 300, files: [] } },
+    ]) {
+      const s = await setup();
+      onlyMergesAfterApproval(s);
+      s.world.prFiles = files;
+
+      await linkPosted(s);
+
+      expect(s.review).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it('reviews when a real commit came after the approval', async () => {
+    const s = await setup();
+    s.world.existingReviews = [approval('APPROVED', APPROVED_SHA)];
+    s.world.prCommits = [commit(APPROVED_SHA, 1), commit('c'.repeat(40), 1), commit(HEAD_SHA, 2)];
+
+    await linkPosted(s);
+
+    expect(s.review).toHaveBeenCalledTimes(1);
+  });
+
+  it('reviews when the history was rewritten after the approval', async () => {
+    const s = await setup();
+    s.world.existingReviews = [approval('APPROVED', APPROVED_SHA)];
+    s.world.prCommits = [commit('d'.repeat(40), 1), commit(HEAD_SHA, 2)]; // approved commit is gone
+
+    await linkPosted(s);
+
+    expect(s.review).toHaveBeenCalledTimes(1);
+  });
+
+  it('reviews when the listed commits do not end at the current head', async () => {
+    const s = await setup();
+    s.world.existingReviews = [approval('APPROVED', APPROVED_SHA)];
+    s.world.prCommits = [commit(APPROVED_SHA, 1), commit('e'.repeat(40), 2)]; // list truncated or stale
+
+    await linkPosted(s);
+
+    expect(s.review).toHaveBeenCalledTimes(1);
+  });
+
+  it('ignores messages matching ignore_message_patterns', async () => {
+    const s = await setup({ configYaml: "slack: { ignore_message_patterns: ['マージします', 'release'] }" });
+
+    await s.service.handleMessage(message({ text: `これマージします ${URL}` }));
+    await s.service.handleMessage(message({ ts: '300.1', text: `Release today: <${URL}|#7>` }));
+    await s.service.idle();
+
+    expect(s.review).not.toHaveBeenCalled();
+  });
+
+  it('does not match ignore patterns against the links themselves', async () => {
+    const s = await setup({ configYaml: "slack: { ignore_message_patterns: ['merge'] }" });
+
+    await s.service.handleMessage(
+      message({ text: 'please review https://github.com/acme/api/pull/7?merge=1' }),
+    );
+    await s.service.idle();
+
+    expect(s.review).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not match ignore patterns against links written without a scheme', async () => {
+    const s = await setup({ configYaml: "slack: { ignore_message_patterns: ['release'] }" });
+
+    await s.service.handleMessage(message({ text: `please review ${URL} (see example.com/release/notes)` }));
+    await s.service.idle();
+
+    expect(s.review).toHaveBeenCalledTimes(1);
+  });
+
+  it('reviews a PR again once it is ready, after an earlier request was skipped', async () => {
+    const s = await setup();
+    s.world.mergedAfterViews = 2;
+    await linkPosted(s);
+    s.world.mergedAfterViews = Number.POSITIVE_INFINITY;
+
+    await s.service.handleMessage(message({ ts: '300.1' }));
+    await s.service.idle();
+
+    expect(s.review).toHaveBeenCalledTimes(1);
+  });
+
+  it('drops a review whose PR was merged while it waited, without ✅ or ❌', async () => {
+    const s = await setup({ configYaml: REACTIONS_ON });
+    s.world.mergedAfterViews = 2; // open when the link is read, merged when the review starts
+
+    await linkPosted(s);
+
+    expect(s.review).not.toHaveBeenCalled();
+    expect(s.slack.of('addReaction').map((r) => r['name'])).toEqual(['eyes']);
+    expect(s.slack.of('removeReaction').map((r) => r['name'])).toEqual(['eyes']);
+    expect(s.slack.of('postMessage')).toEqual([]);
   });
 
   it('reviews when the owner later requested changes on the same head', async () => {
@@ -467,7 +693,9 @@ describe('duplicate results for one commit', () => {
     await s.service.resumeInterrupted();
     await s.service.idle();
 
-    expect(s.slack.of('postMessage').filter((m) => m['channel'] === 'C0NOTIFY1')).toHaveLength(1);
+    expect(s.slack.of('postMessage').filter((m) => m['channel'] === 'C0NOTIFY1' && m['blocks'])).toHaveLength(
+      1,
+    );
     expect((await s.store.get(late.id))?.status).toBe('dismissed');
   });
 });
@@ -805,6 +1033,26 @@ describe('resumeInterrupted', () => {
     await s.service.resumeInterrupted();
 
     expect((await s.store.get(idOf(reviewId)))?.status).toBe('notified');
+  });
+
+  it('replies in the start thread when a resumed review turns out to be unnecessary', async () => {
+    const s = await setup();
+    const rec = await s.store.create({
+      pr: { owner: 'acme', repo: 'api', number: 7, url: URL, title: 't', author: 'alice' },
+      requestedBy: 'U0REQ0001',
+      source: { channel: 'C0WATCH01', ts: '1.1' },
+      requestedHeadSha: HEAD_SHA,
+    });
+    await s.store.update(rec.id, { status: 'running', startNotice: { channel: 'C0NOTIFY1', ts: '9.9' } });
+    s.world.mergedNumbers = [7];
+
+    await s.service.resumeInterrupted();
+    await s.service.idle();
+
+    expect(s.review).not.toHaveBeenCalled();
+    expect((await s.store.get(rec.id))?.status).toBe('skipped');
+    const note = s.slack.of('postMessage').find((m) => m['thread_ts'] === '9.9' || m['threadTs'] === '9.9');
+    expect(String(note?.['text'])).toMatch(/Stopped/);
   });
 
   it('re-runs reviews left running by a crash', async () => {

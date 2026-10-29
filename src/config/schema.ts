@@ -1,5 +1,12 @@
 import { z } from 'zod';
 
+/**
+ * A quantified group that itself contains a quantifier, e.g. `(a+)+` or `(\\w*)*`: the classic shape of
+ * catastrophic backtracking. Patterns come from the operator, but one slip would let any message
+ * in a watched channel stall the daemon, so such patterns are refused outright.
+ */
+const NESTED_QUANTIFIER = /\((?:[^()\\]|\\.)*[*+](?:[^()\\]|\\.)*\)\s*(?:[*+]|\{\d*,)/;
+
 const SlackId = z.string().regex(/^[A-Z][A-Z0-9]{6,}$/, 'expected a Slack ID such as U0123ABCD or C0123ABCD');
 
 /** Tool permission rule as understood by Claude Code, e.g. `Bash(git diff *)`. */
@@ -23,6 +30,35 @@ export const ConfigSchema = z.object({
     allowed_requesters: z.array(SlackId).default([]),
     /** Whose posts never trigger a review (e.g. your own). Wins over allowed_requesters. */
     ignored_requesters: z.array(SlackId).default([]),
+    /**
+     * Messages matching any of these (case-insensitive regular expressions, tested against the text
+     * without its links) never trigger a review, e.g. announcements like "merging" / "releasing".
+     */
+    /**
+     * Put 👀 / ✅ / ❌ on the request message. Off by default: other people in the channel read the
+     * reactions as a statement about the PR.
+     */
+    react_to_requests: z.boolean().default(false),
+    /** Posted to notify_channel when a review starts; `{pr}` becomes a link to the PR. */
+    started_message: z.string().min(1).default('Started reviewing {pr}'),
+    ignore_message_patterns: z
+      .array(
+        z
+          .string()
+          .refine((p) => {
+            try {
+              new RegExp(p, 'i');
+              return true;
+            } catch {
+              return false;
+            }
+          }, 'not a valid regular expression')
+          .refine(
+            (p) => !NESTED_QUANTIFIER.test(p),
+            'nested quantifiers such as (a+)+ can hang the daemon (catastrophic backtracking); rewrite the pattern',
+          ),
+      )
+      .default([]),
   }),
   github: z.object({
     allowed_repos: z.array(z.string().min(1)).min(1),

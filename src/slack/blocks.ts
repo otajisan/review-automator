@@ -54,6 +54,11 @@ function context(text: string): KnownBlock {
   return { type: 'context', elements: [{ type: 'mrkdwn', text: truncate(text) }] };
 }
 
+/** `owner/repo#n title`, linked to the PR. */
+export function prMention(rec: ReviewRecord): string {
+  return prLink(rec);
+}
+
 function prLink(rec: ReviewRecord): string {
   const slug = `${rec.pr.owner}/${rec.pr.repo}#${rec.pr.number}`;
   return `<${rec.pr.url}|${escapeMrkdwn(slug)}> ${escapeMrkdwn(rec.pr.title)}`;
@@ -112,6 +117,11 @@ function findingsList(classified: Classified): string[] {
     );
   }
   return lines;
+}
+
+/** Text for the "started reviewing" message: `{pr}` in the template becomes a link to the PR. */
+export function startedText(rec: ReviewRecord, template: string): string {
+  return template.split('{pr}').join(prLink(rec));
 }
 
 export function notificationText(rec: ReviewRecord, ownerUserId: string): string {

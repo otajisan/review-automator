@@ -7,7 +7,16 @@ import { AppError } from '../lib/errors.js';
 import type { ReviewResult } from '../review/schema.js';
 
 export type ReviewStatus =
-  'queued' | 'running' | 'notified' | 'posting' | 'posted' | 'dismissed' | 'stale' | 'failed';
+  | 'queued'
+  | 'running'
+  | 'notified'
+  | 'posting'
+  | 'posted'
+  | 'dismissed'
+  | 'stale'
+  | 'failed'
+  /** Dropped before reviewing (draft, merged, approved meanwhile); does not count as reviewed. */
+  | 'skipped';
 
 export interface SlackLocation {
   readonly channel: string;
@@ -31,6 +40,8 @@ export interface ReviewRecord {
    * notification of the same record cannot act on a newer result.
    */
   readonly notificationNonce?: string;
+  /** "Started reviewing" message in notify_channel; progress and failures are replied in its thread. */
+  readonly startNotice?: SlackLocation;
   /** When the GitHub POST was last attempted; reconciliation waits a grace period after it. */
   readonly postAttemptAt?: string;
   readonly result?: ReviewResult;
@@ -158,9 +169,11 @@ export async function createFileReviewStore(
           (r) =>
             samePr(r.pr, pr) &&
             (r.requestedHeadSha === headSha || r.headSha === headSha) &&
-            // Failed and superseded (stale) reviews must not block a new one.
+            // Failed, superseded (stale) and skipped requests must not block a new one: a PR skipped
+            // as a draft must be reviewable once it is marked ready, without a new push.
             r.status !== 'failed' &&
-            r.status !== 'stale',
+            r.status !== 'stale' &&
+            r.status !== 'skipped',
         ),
       ),
 
