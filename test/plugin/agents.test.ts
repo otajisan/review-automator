@@ -25,7 +25,7 @@ interface AgentFrontmatter {
 
 async function readAgent(name: string): Promise<AgentFrontmatter> {
   const text = await readFile(path.join(PLUGIN_DIR, 'agents', `${name}.md`), 'utf8');
-  const match = /^---\n([\s\S]*?)\n---\n/.exec(text);
+  const match = /^---\r?\n([\s\S]*?)\r?\n---\r?\n/.exec(text);
   if (!match?.[1]) throw new Error(`agent ${name} has no frontmatter`);
   return parse(match[1]) as AgentFrontmatter;
 }

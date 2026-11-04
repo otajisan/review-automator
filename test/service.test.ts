@@ -324,7 +324,7 @@ describe('handleMessage', () => {
 
   it('reports a failed review in the thread of its start message, in the notify channel', async () => {
     const s = await setup({
-      review: () => Promise.reject(new ReviewError('timeout', 'review timed out after 20 minutes')),
+      review: () => Promise.reject(new ReviewError('timeout', 'review timed out after 30 minutes')),
     });
 
     await s.service.handleMessage(message());
