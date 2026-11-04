@@ -120,6 +120,7 @@ See [`config.example.yaml`](config.example.yaml) for every option. The ones you 
 | `review.per_repo.<owner/repo>.extra_skills`           | Extra skills from `~/.claude/skills` to run for that repository  |
 | `review.per_repo.<owner/repo>.allowed_tools`          | Read-only commands those skills need (the session never prompts) |
 | `review.env`                                          | Extra environment for the review session (rarely needed)         |
+| `review.model`                                        | Model of the session that drives the review (default `sonnet`)   |
 | `review.max_budget_usd`, `review.timeout_minutes`     | Per-review limits                                                |
 | `post.*`                                              | Review bodies and the event used when a must-fix issue is found  |
 
@@ -130,7 +131,9 @@ plugins in `~/.claude/settings.json`) plus the bundled [`plugin/`](plugin). To r
 agents, set e.g. `reviewers: [my-correctness-reviewer, my-security-reviewer]`. The bundled
 [`pr-review` skill](plugin/skills/pr-review/SKILL.md) runs the reviewers in parallel, sends must-fix
 findings to the verifier, and returns structured findings; you can also point `review.skill` at your own
-skill as long as it returns the same structure.
+skill as long as it returns the same structure. The bundled reviewers and verifier run on Opus (set by
+`model:` in their frontmatter, not by `review.model`); point `reviewers` at your own agents to use another
+model.
 
 Because the session runs unattended, anything the guard does not allow is denied rather than prompted
 (see [Security model](#security-model)). Denials are logged; add read-only rules such as
@@ -184,13 +187,14 @@ can do.
 
 ## Troubleshooting
 
-| Symptom                                     | Check                                                                                |
-| ------------------------------------------- | ------------------------------------------------------------------------------------ |
-| Nothing happens when a PR is posted         | The bot is in the channel; the repo matches `allowed_repos`; logs                    |
-| `review session is missing skill …`         | `pnpm check-setup`; names in `review.skill` / `reviewers` / `verifier`               |
-| `review did not complete`                   | A reviewer failed or did not report; see logs, raise `max_turns` / `timeout_minutes` |
-| Works in the terminal but not under launchd | Re-run `install-launchd.sh` from a shell where `gh` and `node` resolve               |
-| Logs                                        | `~/Library/Logs/review-automator/review-automator{,.err}.log`                        |
+| Symptom                                     | Check                                                                                 |
+| ------------------------------------------- | ------------------------------------------------------------------------------------- |
+| Nothing happens when a PR is posted         | The bot is in the channel; the repo matches `allowed_repos`; logs                     |
+| `review session is missing skill …`         | `pnpm check-setup`; names in `review.skill` / `reviewers` / `verifier`                |
+| `review did not complete`                   | A reviewer failed or did not report; see logs, raise `max_turns` / `timeout_minutes`  |
+| `review stopped at the budget limit`        | Raise `max_budget_usd`; the cost is an estimate and is counted even on a subscription |
+| Works in the terminal but not under launchd | Re-run `install-launchd.sh` from a shell where `gh` and `node` resolve                |
+| Logs                                        | `~/Library/Logs/review-automator/review-automator{,.err}.log`                         |
 
 ## Development
 

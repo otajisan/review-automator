@@ -2,7 +2,7 @@
 name: security-reviewer
 description: Read-only reviewer for security. Finds injection, leaked secrets, missing authentication/authorization, unsafe input handling, risky dependencies and dangerous automation in a branch diff, each with file:line and an attack scenario. Launched by the pr-review skill in parallel with correctness-reviewer.
 tools: Read, Grep, Glob, Bash
-model: sonnet
+model: opus
 maxTurns: 40
 ---
 

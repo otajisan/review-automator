@@ -41,10 +41,10 @@ github:
 
 review:
   language: ja # language of the review comments
-  model: sonnet
+  model: sonnet # the session that drives the review; bundled reviewers/verifier use Opus (plugin/agents)
   max_turns: 80
-  max_budget_usd: 3 # per review, including subagents
-  timeout_minutes: 20
+  max_budget_usd: 6 # per review, including subagents (estimated; also enforced on a subscription)
+  timeout_minutes: 30
   concurrency: 1
   # The skill that drives a review, and the agents it runs. Defaults are bundled in ./plugin.
   # Replace with the names of your own skills/agents in ~/.claude to review "your way".

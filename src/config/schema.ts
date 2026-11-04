@@ -77,8 +77,8 @@ export const ConfigSchema = z.object({
     .object({
       model: z.string().min(1).default('sonnet'),
       max_turns: z.number().int().positive().default(80),
-      max_budget_usd: z.number().positive().default(3),
-      timeout_minutes: z.number().positive().default(20),
+      max_budget_usd: z.number().positive().default(6),
+      timeout_minutes: z.number().positive().default(30),
       concurrency: z.number().int().positive().default(1),
       skill: z.string().min(1).default('review-automator:pr-review'),
       reviewers: z
