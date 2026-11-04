@@ -2,7 +2,7 @@
 name: correctness-reviewer
 description: Read-only reviewer for correctness. Finds real bugs, edge cases, swallowed errors, races, missing tests and convention violations in a branch diff, each with file:line and a concrete failure scenario. Launched by the pr-review skill in parallel with security-reviewer.
 tools: Read, Grep, Glob, Bash
-model: sonnet
+model: opus
 maxTurns: 40
 ---
 

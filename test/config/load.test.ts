@@ -33,6 +33,9 @@ describe('parseConfig', () => {
       'review-automator:security-reviewer',
     ]);
     expect(config.review.concurrency).toBe(1);
+    expect(config.review.model).toBe('sonnet');
+    expect(config.review.max_budget_usd).toBe(6);
+    expect(config.review.timeout_minutes).toBe(30);
     expect(config.post.severity_on_findings).toBe('COMMENT');
     expect(config.post.approve_body_no_findings).toBe('LGTM!! :+1:');
   });
