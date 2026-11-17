@@ -139,7 +139,10 @@ export function notificationText(rec: ReviewRecord, ownerUserId: string): string
 
 function limitText(text: string, max = OPTION_TEXT_MAX): string {
   const clean = redactSecrets(text);
-  return clean.length <= max ? clean : `${clean.slice(0, max - 1)}…`;
+  if (clean.length <= max) return clean;
+  // Step back off a lone high surrogate: Slack rejects the whole message over half an emoji.
+  const end = /[\uD800-\uDBFF]/.test(clean.charAt(max - 2)) ? max - 2 : max - 1;
+  return `${clean.slice(0, end)}…`;
 }
 
 function pickOption({ n, index, finding: f, group }: NumberedFinding): PlainTextOption {

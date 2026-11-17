@@ -250,6 +250,17 @@ describe('finding checkboxes', () => {
     expect(JSON.stringify(blocks)).toContain('#41');
   });
 
+  it('never cuts a label inside an emoji', () => {
+    // "#1 🟡 src/a.ts:3 " is 17 code units, so the emoji sits across the cut at 74.
+    const title = `${'x'.repeat(56)}😀${'y'.repeat(30)}`;
+
+    const [group] = checkboxes(blocksFor([finding({ title })]));
+
+    const label = group?.options[0]?.text.text ?? '';
+    expect(label.length).toBeLessThanOrEqual(75);
+    expect(label).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
+  });
+
   it('masks secret-like text in labels', () => {
     const [group] = checkboxes(blocksFor([finding({ title: `key ghp_${'a'.repeat(36)}` })]));
 
