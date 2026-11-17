@@ -182,7 +182,7 @@ can do.
 - **The model does not decide what is posted.** Approval is computed in code; a must-fix the verifier
   could not rule out blocks approval. Mentions and remote images in model text are neutralised, and
   text that looks like a credential is never posted.
-- **Only you can post**, after reading each comment in full in the Slack thread. The head commit is checked
+- **Only you can post**, after reading each comment in full in the Slack thread (a very long one is cut short and marked ✂️). The head commit is checked
   again before posting and the review is pinned to it.
 - **You choose who can trigger reviews**: `slack.allowed_requesters` (only these people) and
   `slack.ignored_requesters` (never these people, e.g. yourself; it wins over the allow list).
