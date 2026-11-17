@@ -84,6 +84,26 @@ describe('findingThreadMessages', () => {
     expect(JSON.stringify(msgs.at(-1))).toMatch(/not shown/);
   });
 
+  it('still shows every finding when earlier ones are too long to show in full', () => {
+    // Each long body needs two messages: the first 15 findings alone use up the 30 allowed.
+    const long = Array.from({ length: 2000 }, (_, i) => `row ${i} ${'q'.repeat(60)}`).join('\n');
+    const findings = [
+      ...Array.from({ length: 15 }, (_, i) =>
+        finding({ id: `M${i}`, severity: 'must_fix', line: i + 1, body: long }),
+      ),
+      ...Array.from({ length: 5 }, (_, i) =>
+        finding({ id: `S${i}`, line: i + 100, title: `Later ${i}`, body: `body of later ${i}` }),
+      ),
+    ];
+
+    const msgs = findingThreadMessages(findings);
+
+    expect(msgs.length).toBeLessThanOrEqual(30);
+    const all = JSON.stringify(msgs);
+    for (let i = 0; i < 5; i += 1) expect(all).toContain(`body of later ${i}`);
+    expect(JSON.stringify(msgs.at(-1))).toMatch(/not shown \(#\d+/);
+  });
+
   it('returns nothing when there are no findings', () => {
     expect(findingThreadMessages([])).toEqual([]);
   });
