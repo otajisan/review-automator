@@ -28,7 +28,16 @@ import { errorMessage, ReviewError } from './lib/errors.js';
 import { createKeyedLock } from './lib/keyed-lock.js';
 import { findSecretLike } from './lib/secrets.js';
 import type { Logger } from './lib/logger.js';
-import { classify, decideEvent, planReview, type PostMode } from './review/decision.js';
+import {
+  decideEvent,
+  numberFindings,
+  planReview,
+  selectFindings,
+  type ApproveBlocker,
+  type Classified,
+  type Picks,
+  type PostMode,
+} from './review/decision.js';
 import type { ReviewOutcome } from './review/run-review.js';
 import {
   ACTIONS,
@@ -42,6 +51,7 @@ import {
   staleBlocks,
   type Verdict,
 } from './slack/blocks.js';
+import { findingThreadMessages } from './slack/finding-thread.js';
 import type { SlackPort } from './slack/port.js';
 import type { ReviewRecord, ReviewStore, SlackLocation } from './store/reviews.js';
 
@@ -75,6 +85,8 @@ export interface IncomingAction {
   readonly value: string;
   readonly userId: string;
   readonly channel?: string;
+  /** The finding checkboxes when the button was pressed; absent on older notifications. */
+  readonly picks?: Picks;
 }
 
 export interface Service {
@@ -116,6 +128,38 @@ function verdictOf(blocker: ReturnType<typeof decideEvent>['blocker']): Verdict 
   if (blocker === 'must_fix') return 'must_fix';
   if (blocker === 'unresolved') return 'unresolved';
   return 'approve';
+}
+
+/** Consecutive failed thread replies after which Slack is assumed to be unavailable. */
+const MAX_THREAD_FAILURES = 2;
+
+/** What a button asks for: how to post, and the findings the owner left checked. */
+interface PostChoice {
+  readonly mode: PostMode;
+  readonly picks?: Picks | undefined;
+  /** "Post selected & Approve": approve or post nothing, never fall back to a plain comment. */
+  readonly approveOnly?: boolean;
+}
+
+interface PostRequest {
+  readonly mode: PostMode;
+  readonly classified: Classified;
+}
+
+type PostedCounts = NonNullable<NonNullable<ReviewRecord['posted']>['findings']>;
+
+const APPROVAL_REFUSED: Record<ApproveBlocker, string> = {
+  must_fix: 'a must-fix finding is still checked. Uncheck it to approve, or use *Post selected*.',
+  unresolved:
+    'a possible must-fix the verifier could not settle blocks approval. If you have ruled it out, approve on GitHub yourself.',
+  own_pr: 'GitHub does not allow approving your own PR. Use *Post selected*.',
+  comments_only: 'this button only approves.',
+};
+
+/** How many of the findings offered in Slack were posted; omitted when there were none to choose from. */
+function findingCounts(rec: ReviewRecord, classified: Classified): PostedCounts | undefined {
+  const total = numberFindings(rec.result?.findings ?? []).length;
+  return total > 0 ? { posted: classified.postable.length, total } : undefined;
 }
 
 export function createService(deps: ServiceDeps): Service {
@@ -374,6 +418,25 @@ export function createService(deps: ServiceDeps): Service {
     clearTimeout(timer);
   }
 
+  /** Each finding in full, under the notification. Best effort: the buttons work without it. */
+  async function postFindingThread(rec: ReviewRecord): Promise<void> {
+    if (!rec.notification || !rec.result) return;
+    const { channel, ts } = rec.notification;
+    let failuresInARow = 0;
+    // One at a time, so the numbered findings read top to bottom.
+    for (const msg of findingThreadMessages(rec.result.findings)) {
+      try {
+        await slack.postMessage({ channel, threadTs: ts, text: msg.text, blocks: msg.blocks });
+        failuresInARow = 0;
+      } catch (err) {
+        // One rejected message must not hide the rest; Slack being down should not be waited out.
+        failuresInARow += 1;
+        logger.warn({ reviewId: rec.id, err: errorMessage(err) }, 'could not post a finding to the thread');
+        if (failuresInARow >= MAX_THREAD_FAILURES) return;
+      }
+    }
+  }
+
   /** A follow-up about a review, in the thread of its start message (or the notify channel). */
   async function threadNote(reviewId: string, text: string): Promise<void> {
     const rec = await store.get(reviewId);
@@ -417,7 +480,7 @@ export function createService(deps: ServiceDeps): Service {
       });
       // The PR may have moved on between request and checkout, so two requests can end up reviewing
       // the same commit. Under the PR lock, only the first to finish notifies.
-      const superseded = await withPrLock(prSlug(rec.pr).toLowerCase(), async () => {
+      const { superseded, notified } = await withPrLock(prSlug(rec.pr).toLowerCase(), async () => {
         const others = await store.listForPr(rec.pr);
         const earlier = others.find(
           (r) => r.id !== reviewId && r.headSha === outcome.headSha && LIVE_RESULT.has(r.status),
@@ -427,11 +490,11 @@ export function createService(deps: ServiceDeps): Service {
             status: 'dismissed',
             error: `same commit already reviewed in ${earlier.id}`,
           });
-          return earlier;
+          return { superseded: earlier, notified: undefined };
         }
         const notification = await notify(reviewed, outcome);
-        await store.update(reviewId, { status: 'notified', notification });
-        return undefined;
+        const done = await store.update(reviewId, { status: 'notified', notification });
+        return { superseded: undefined, notified: done };
       });
       if (superseded) {
         log.info({ earlier: superseded.id }, 'same commit was already reviewed; not notifying twice');
@@ -441,6 +504,7 @@ export function createService(deps: ServiceDeps): Service {
         );
       }
       await sourceFinished(rec.source, 'ok');
+      if (notified) await postFindingThread(notified);
     } catch (err) {
       if (shutdownController.signal.aborted) {
         await store.update(reviewId, { status: 'queued' });
@@ -497,7 +561,7 @@ export function createService(deps: ServiceDeps): Service {
   /** Re-checks the PR right before posting. Returns what to post, or null when it must not be posted. */
   async function preparePost(
     rec: ReviewRecord,
-    mode: PostMode,
+    req: PostRequest,
     userId: string,
   ): Promise<ReviewPayload | null> {
     const pr = await fetchPr(gh, rec.pr);
@@ -531,10 +595,10 @@ export function createService(deps: ServiceDeps): Service {
     }
     const commentable = parseCommentableLines(await diffFor(rec.pr));
     const plan = planReview({
-      classified: classify(rec.result?.findings ?? []),
+      classified: req.classified,
       commentable,
       isOwnPr: isOwnPr(config, pr),
-      mode,
+      mode: req.mode,
       post: config.post,
     });
     const leaked = findSecretLike([plan.body, ...plan.comments.map((c) => c.body)].join('\n'));
@@ -558,7 +622,7 @@ export function createService(deps: ServiceDeps): Service {
     });
   }
 
-  async function post(rec: ReviewRecord, mode: PostMode, userId: string): Promise<void> {
+  async function post(rec: ReviewRecord, req: PostRequest, userId: string): Promise<void> {
     const claimed = await store.transition(rec.id, ['notified'], 'posting');
     if (!claimed) {
       // Stuck in `posting` from an earlier attempt whose outcome is unknown: check GitHub first.
@@ -569,7 +633,7 @@ export function createService(deps: ServiceDeps): Service {
 
     let payload: ReviewPayload | null;
     try {
-      payload = await preparePost(claimed, mode, userId);
+      payload = await preparePost(claimed, req, userId);
     } catch (err) {
       // Nothing was sent to GitHub yet, so the buttons can safely be offered again.
       await store.transition(rec.id, ['posting'], 'notified');
@@ -589,7 +653,7 @@ export function createService(deps: ServiceDeps): Service {
         { reviewId: rec.id, event: payload.event, comments: payload.comments.length },
         'review posted',
       );
-      await recordPosted(rec, posted.url, payload.event);
+      await recordPosted(rec, posted.url, payload.event, findingCounts(rec, req.classified));
     } catch (err) {
       logger.error({ reviewId: rec.id, err: errorMessage(err) }, 'posting failed');
       // A timeout or lost response may still have created the review; only a 4xx proves it did not.
@@ -614,12 +678,17 @@ export function createService(deps: ServiceDeps): Service {
    * The review is on GitHub from here on. Nothing below may move the record back to `notified`,
    * or the next click would post it a second time.
    */
-  async function recordPosted(rec: ReviewRecord, url: string, event: ReviewEvent): Promise<void> {
+  async function recordPosted(
+    rec: ReviewRecord,
+    url: string,
+    event: ReviewEvent,
+    findings?: PostedCounts,
+  ): Promise<void> {
     let current = rec;
     try {
       current = await store.update(rec.id, {
         status: 'posted',
-        posted: { url, event, at: new Date().toISOString() },
+        posted: { url, event, at: new Date().toISOString(), ...(findings ? { findings } : {}) },
       });
     } catch (err) {
       logger.error(
@@ -627,15 +696,35 @@ export function createService(deps: ServiceDeps): Service {
         'review posted but its state could not be saved',
       );
     }
-    await resolveMessage(current, postedOutcome(url, event)).catch((err: unknown) =>
+    await resolveMessage(current, postedOutcome(url, event, findings)).catch((err: unknown) =>
       logger.warn({ reviewId: rec.id, err: errorMessage(err) }, 'could not update the Slack message'),
     );
   }
 
   /** Checked before registering, so a retry of a stuck post is not mistaken for itself. */
-  function startPost(rec: ReviewRecord, mode: PostMode, userId: string): Promise<void> {
+  function startPost(rec: ReviewRecord, choice: PostChoice, userId: string): Promise<void> {
     if (inflightIds.has(rec.id)) return ephemeral(userId, 'This review is being posted right now.');
-    return track(rec.id, post(rec, mode, userId));
+    const classified = selectFindings(rec.result?.findings ?? [], choice.picks);
+    const refused = refusal(rec, choice, classified);
+    // Refused before the record is claimed, so the buttons stay usable.
+    if (refused) return ephemeral(userId, `:no_entry: Not posted: ${refused}`);
+    return track(rec.id, post(rec, { mode: choice.mode, classified }, userId));
+  }
+
+  /** Why this button press must not post, judged on the findings the owner left checked. */
+  function refusal(rec: ReviewRecord, choice: PostChoice, classified: Classified): string | undefined {
+    if (choice.approveOnly) {
+      const { blocker } = decideEvent(classified, {
+        isOwnPr: isOwnPr(config, rec.pr),
+        mode: 'review',
+        severityOnFindings: config.post.severity_on_findings,
+      });
+      return blocker ? APPROVAL_REFUSED[blocker] : undefined;
+    }
+    if (choice.picks && classified.postable.length === 0) {
+      return 'nothing is checked. Check the findings to post, or use *Dismiss*.';
+    }
+    return undefined;
   }
 
   async function rereview(rec: ReviewRecord, userId: string): Promise<void> {
@@ -743,9 +832,11 @@ export function createService(deps: ServiceDeps): Service {
       }
       switch (action.actionId) {
         case ACTIONS.postReview:
-          return startPost(rec, 'review', action.userId);
+          return startPost(rec, { mode: 'review', picks: action.picks }, action.userId);
         case ACTIONS.postCommentsOnly:
-          return startPost(rec, 'comments_only', action.userId);
+          return startPost(rec, { mode: 'comments_only', picks: action.picks }, action.userId);
+        case ACTIONS.postSelectedApprove:
+          return startPost(rec, { mode: 'review', picks: action.picks, approveOnly: true }, action.userId);
         case ACTIONS.dismiss: {
           const done = await store.transition(rec.id, ['notified'], 'dismissed');
           if (done) await resolveMessage(done, '🙈 Dismissed review of');

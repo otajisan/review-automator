@@ -1,6 +1,7 @@
 import bolt, { type webApi } from '@slack/bolt';
 import { errorMessage } from '../lib/errors.js';
 import type { Logger } from '../lib/logger.js';
+import type { Picks } from '../review/decision.js';
 import type { IncomingMessage, Service } from '../service.js';
 import type { SlackPort } from './port.js';
 
@@ -63,6 +64,42 @@ export function toIncomingMessage(raw: unknown): IncomingMessage | undefined {
   };
 }
 
+const PICK_ACTION = /^ra_pick_(\d+)$/;
+const INDEX = /^\d+$/;
+
+function record(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : undefined;
+}
+
+/** Checked values of one checkbox element, keeping only well-formed finding indices. */
+function checkedIndices(element: unknown): number[] {
+  const selected = record(element)?.['selected_options'];
+  if (!Array.isArray(selected)) return [];
+  return selected
+    .map((o) => str(record(o)?.['value']))
+    .filter((v): v is string => v !== undefined && INDEX.test(v))
+    .map(Number);
+}
+
+/**
+ * The finding checkboxes as they were when a button was pressed (`body.state` of a block action).
+ * Undefined when the message had none, e.g. a notification from before checkboxes existed.
+ */
+export function picksFromState(state: unknown): Picks | undefined {
+  const values = record(record(state)?.['values']) ?? {};
+  const entries = Object.values(values).flatMap((block) =>
+    Object.entries(record(block) ?? {}).flatMap(([actionId, element]) => {
+      const group = PICK_ACTION.exec(actionId)?.[1];
+      return group === undefined ? [] : [[Number(group), checkedIndices(element)] as const];
+    }),
+  );
+  return entries.length > 0 ? new Map(entries) : undefined;
+}
+
+function withPicks(picks: Picks | undefined): { picks?: Picks } {
+  return picks ? { picks } : {};
+}
+
 export interface SlackApp {
   readonly port: SlackPort;
   start(): Promise<void>;
@@ -98,6 +135,8 @@ export function createSlackApp(opts: {
 
   app.action({ type: 'block_actions', action_id: /^ra_/ }, async ({ ack, body, action }) => {
     await ack(); // Slack requires an ack within 3 seconds; the work continues after it.
+    // Ticking a finding changes nothing yet; its state is read when a button is pressed.
+    if (PICK_ACTION.test(action.action_id)) return;
     const value = 'value' in action ? str(action.value) : undefined;
     if (!value) {
       log.warn({ actionId: action.action_id }, 'button without a value ignored');
@@ -110,6 +149,7 @@ export function createSlackApp(opts: {
         value,
         userId: body.user.id,
         ...(body.channel?.id ? { channel: body.channel.id } : {}),
+        ...withPicks(picksFromState(body.state)),
       })
       .catch((err: unknown) => log.error({ err: errorMessage(err) }, 'action handler failed'));
   });

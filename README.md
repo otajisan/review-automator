@@ -16,7 +16,7 @@ sequenceDiagram
     R->>C: /review-automator:pr-review (read-only)
     C-->>R: structured findings (verified must-fix issues)
     R->>S: summary + buttons to you
-    Note over S: you press "Post comments & Approve"
+    Note over S: you check the findings to post, then "Post selected & Approve"
     R->>G: one review: inline comments + APPROVE / COMMENT
 ```
 
@@ -95,12 +95,11 @@ sequenceDiagram
 | The same PR head was already reviewed                                                   | Ignored. After a new push, it is reviewed again                                                                                                                                                                                                                                 |
 | The PR is merged, closed or a draft                                                     | Ignored (drafts: unless `github.skip_drafts: false`)                                                                                                                                                                                                                            |
 | You already approved the PR's current head                                              | Ignored (unless `github.skip_approved_by_owner: false`). Commits after your approval that only merge the base branch in still count as approved, as long as the PR's own changes are identical (a conflict resolution in a merge is reviewed); any other new commit is reviewed |
-| Review finished                                                                         | Summary + buttons in `notify_channel`, mentioning you                                                                                                                                                                                                                           |
+| Review finished                                                                         | Summary, a checkbox per finding + buttons in `notify_channel`, mentioning you; every finding in full (and the refuted ones by title) is replied in that message's thread, with the same numbers                                                                                 |
 | Review failed (timeout, budget, …)                                                      | The reason is replied in the thread of its start message in `notify_channel`                                                                                                                                                                                                    |
 | `slack.react_to_requests: true`                                                         | Additionally puts 👀 on the request while its reviews run, then ✅ (all succeeded) or ❌ (any failed). Off by default because others read the reactions as a verdict on the PR                                                                                                  |
-| You press **Post comments & Approve** / **Approve (LGTM)**                              | One GitHub review with the inline comments and `APPROVE`                                                                                                                                                                                                                        |
-| You press **Post comments** (must-fix found)                                            | One GitHub review with `COMMENT` (or `REQUEST_CHANGES`, see config)                                                                                                                                                                                                             |
-| You press **Comments only**                                                             | Same comments, `COMMENT` instead of approval                                                                                                                                                                                                                                    |
+| You press **Post selected & Approve** / **Approve (LGTM)**                              | One GitHub review with the checked findings as inline comments and `APPROVE`. Refused (nothing posted) while a must-fix is checked, while a must-fix the verifier could not settle exists, or on your own PR                                                                    |
+| You press **Post selected**                                                             | One GitHub review with the checked findings and `COMMENT` (`REQUEST_CHANGES` instead if a must-fix is checked and configured so). Refused when nothing is checked                                                                                                               |
 | The PR was pushed to after the review                                                   | Nothing is posted; you get a **Review again** button                                                                                                                                                                                                                            |
 | Your own PR                                                                             | Reviewed, but only ever posted as `COMMENT` (GitHub forbids self-approval)                                                                                                                                                                                                      |
 | Someone else presses a button                                                           | Refused; only `owner.slack_user_id` can post                                                                                                                                                                                                                                    |
@@ -108,6 +107,11 @@ sequenceDiagram
 Findings are sorted into: **posted** (must-fix confirmed by the verifier, and should-fix), **needs your
 judgement** (must-fix the verifier could not settle — shown in Slack only), **nits** and **refuted**
 (not posted). Findings on lines outside the diff go into the review body instead of inline comments.
+The notification shows one checkbox per finding (number and title); its thread holds the full text of
+each one, with the same numbers, so you can judge them before pressing a button. What would be posted
+anyway starts checked; nits and must-fix findings the verifier could not settle start unchecked and can be
+checked to post them. Uncheck a must-fix you disagree with and the PR can be approved; a must-fix the
+verifier could not settle always blocks approval from Slack. Findings past the 40th cannot be unchecked.
 
 ## Configuration
 
@@ -178,7 +182,7 @@ can do.
 - **The model does not decide what is posted.** Approval is computed in code; a must-fix the verifier
   could not rule out blocks approval. Mentions and remote images in model text are neutralised, and
   text that looks like a credential is never posted.
-- **Only you can post**, after reading a preview of each comment in Slack. The head commit is checked
+- **Only you can post**, after reading each comment in full in the Slack thread. The head commit is checked
   again before posting and the review is pinned to it.
 - **You choose who can trigger reviews**: `slack.allowed_requesters` (only these people) and
   `slack.ignored_requesters` (never these people, e.g. yourself; it wins over the allow list).

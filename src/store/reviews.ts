@@ -47,7 +47,13 @@ export interface ReviewRecord {
   readonly result?: ReviewResult;
   readonly costUsd?: number;
   readonly notification?: SlackLocation;
-  readonly posted?: { readonly url: string; readonly event: ReviewEvent; readonly at: string };
+  readonly posted?: {
+    readonly url: string;
+    readonly event: ReviewEvent;
+    readonly at: string;
+    /** How many of the findings offered in Slack were posted. */
+    readonly findings?: { readonly posted: number; readonly total: number };
+  };
   readonly error?: string;
   readonly createdAt: string;
   readonly updatedAt: string;

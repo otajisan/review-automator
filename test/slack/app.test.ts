@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { toIncomingMessage, webClientPort } from '../../src/slack/app.js';
+import { picksFromState, toIncomingMessage, webClientPort } from '../../src/slack/app.js';
 
 describe('toIncomingMessage', () => {
   it('keeps only the string fields the service needs', () => {
@@ -23,6 +23,46 @@ describe('toIncomingMessage', () => {
   it('rejects events without channel or ts', () => {
     expect(toIncomingMessage({ ts: '1' })).toBeUndefined();
     expect(toIncomingMessage(null)).toBeUndefined();
+  });
+});
+
+describe('picksFromState', () => {
+  const checked = (...values: string[]) => ({
+    type: 'checkboxes',
+    selected_options: values.map((value) => ({ value, text: { type: 'plain_text', text: value } })),
+  });
+
+  it('collects the checked finding indices per checkbox group', () => {
+    const state = {
+      values: {
+        b0: { ra_pick_0: checked('0', '3') },
+        b1: { ra_pick_1: checked() },
+      },
+    };
+
+    expect(picksFromState(state)).toEqual(
+      new Map([
+        [0, [0, 3]],
+        [1, []],
+      ]),
+    );
+  });
+
+  it('is undefined for a message without checkboxes (older notifications)', () => {
+    expect(picksFromState(undefined)).toBeUndefined();
+    expect(picksFromState({ values: {} })).toBeUndefined();
+  });
+
+  it('ignores anything that is not a well-formed finding index', () => {
+    const state = {
+      values: {
+        b0: { ra_pick_0: checked('1', 'x', '-2', '1e3') },
+        other: { something_else: checked('5') },
+        bad: { ra_pick_x: checked('7') },
+      },
+    };
+
+    expect(picksFromState(state)).toEqual(new Map([[0, [1]]]));
   });
 });
 

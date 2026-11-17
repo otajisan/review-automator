@@ -3,6 +3,9 @@ import {
   classify,
   decideEvent,
   formatCommentBody,
+  numberFindings,
+  pickGroups,
+  selectFindings,
   planReview,
   sanitizeMarkdown,
 } from '../../src/review/decision.js';
@@ -168,5 +171,99 @@ describe('sanitizeMarkdown', () => {
 
   it('keeps ordinary HTML-looking code readable', () => {
     expect(sanitizeMarkdown('use `<div>` here')).toBe('use `<div>` here');
+  });
+});
+
+describe('numberFindings', () => {
+  it('numbers postable, then uncertain, then nits, and points back into the original list', () => {
+    const findings = [
+      finding({ id: 'N1', severity: 'nit' }),
+      finding({ id: 'R1', verification: 'refuted' }),
+      finding({ id: 'U1', severity: 'must_fix', verification: 'uncertain' }),
+      finding({ id: 'S1', severity: 'should_fix' }),
+    ];
+
+    const numbered = numberFindings(findings);
+
+    expect(numbered.map((x) => [x.n, x.finding.id, x.index, x.group])).toEqual([
+      [1, 'S1', 3, 'postable'],
+      [2, 'U1', 2, 'uncertain'],
+      [3, 'N1', 0, 'nit'],
+    ]);
+  });
+});
+
+describe('pickGroups', () => {
+  it('splits numbered findings into groups of ten, up to forty', () => {
+    const findings = Array.from({ length: 45 }, (_, i) => finding({ id: `S${i}`, line: i + 1 }));
+
+    const groups = pickGroups(findings);
+
+    expect(groups.map((g) => g.length)).toEqual([10, 10, 10, 10]);
+    expect(groups[1]?.[0]?.n).toBe(11);
+  });
+});
+
+describe('selectFindings', () => {
+  const mustFix = finding({ id: 'M1', severity: 'must_fix', verification: 'confirmed', line: 1 });
+  const should = finding({ id: 'S1', line: 2 });
+  const nit = finding({ id: 'N1', severity: 'nit', line: 3 });
+  const unsure = finding({ id: 'U1', severity: 'must_fix', verification: 'uncertain', line: 4 });
+  const refuted = finding({ id: 'R1', verification: 'refuted', line: 5 });
+  const all = [mustFix, should, nit, unsure, refuted];
+
+  it('posts what classify would when nothing was picked (older notifications)', () => {
+    expect(selectFindings(all, undefined)).toEqual(classify(all));
+  });
+
+  it('posts only the picked findings', () => {
+    const c = selectFindings(all, new Map([[0, [1, 2]]]));
+
+    expect(c.postable.map((f) => f.id)).toEqual(['S1', 'N1']);
+    expect(c.hasMustFix).toBe(false);
+  });
+
+  it('allows approval once every must_fix is unchecked', () => {
+    const c = selectFindings([mustFix, should], new Map([[0, [1]]]));
+
+    expect(decideEvent(c, { isOwnPr: false, mode: 'review', severityOnFindings: 'COMMENT' }).event).toBe(
+      'APPROVE',
+    );
+  });
+
+  it('treats a picked uncertain must_fix as a must_fix', () => {
+    const c = selectFindings(all, new Map([[0, [3]]]));
+
+    expect(c.postable.map((f) => f.id)).toEqual(['U1']);
+    expect(c.hasMustFix).toBe(true);
+  });
+
+  it('still blocks approval over an uncertain must_fix that was left unchecked', () => {
+    const c = selectFindings(all, new Map([[0, []]]));
+
+    expect(c.postable).toEqual([]);
+    expect(c.hasUnresolvedMustFix).toBe(true);
+  });
+
+  it('ignores indices that are out of range, refuted, or not in the picked group', () => {
+    const c = selectFindings(all, new Map([[0, [4, 99, -1]]]));
+
+    expect(c.postable).toEqual([]);
+  });
+
+  it('keeps the default for a group the owner never touched', () => {
+    const many = Array.from({ length: 12 }, (_, i) => finding({ id: `S${i}`, line: i + 1 }));
+
+    const c = selectFindings(many, new Map([[0, [0]]]));
+
+    expect(c.postable.map((f) => f.id)).toEqual(['S0', 'S10', 'S11']);
+  });
+
+  it('posts findings beyond the pickable ones as before', () => {
+    const many = Array.from({ length: 42 }, (_, i) => finding({ id: `S${i}`, line: i + 1 }));
+
+    const c = selectFindings(many, new Map([0, 1, 2, 3].map((g) => [g, []])));
+
+    expect(c.postable.map((f) => f.id)).toEqual(['S40', 'S41']);
   });
 });

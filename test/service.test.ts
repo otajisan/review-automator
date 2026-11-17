@@ -339,6 +339,53 @@ describe('handleMessage', () => {
   });
 });
 
+describe('full findings in the notification thread', () => {
+  const findings = [
+    finding({ id: 'S1', title: 'Should one', body: `first line\n${'long '.repeat(200)}\nlast line` }),
+    finding({ id: 'N1', severity: 'nit', title: 'Nit one' }),
+  ];
+
+  it('replies under the notification with every finding in full', async () => {
+    const s = await setup({ findings });
+
+    await reviewed(s);
+
+    const posts = s.slack.of('postMessage');
+    const noteIndex = posts.findIndex((m) => m['blocks'] && m['channel'] === 'C0NOTIFY1');
+    const noteTs = `${1001 + noteIndex}.000`;
+    const replies = posts.filter((m) => m['threadTs'] === noteTs);
+    expect(replies.map((m) => m['text'])).toEqual([
+      expect.stringMatching(/^#1 .*Should one/),
+      expect.stringMatching(/^#2 .*Nit one/),
+    ]);
+    expect(JSON.stringify(replies[0])).toContain('last line');
+  });
+
+  it('keeps the review usable when the thread replies cannot be posted', async () => {
+    const s = await setup({ findings });
+    const original = s.slack.postMessage.bind(s.slack);
+    s.slack.postMessage = (args) =>
+      args.threadTs && args.blocks ? Promise.reject(new Error('rate limited')) : original(args);
+
+    const value = await reviewed(s);
+
+    expect((await s.store.get(idOf(value)))?.status).toBe('notified');
+  });
+
+  it('keeps posting the other findings when one reply is rejected', async () => {
+    const s = await setup({ findings });
+    const original = s.slack.postMessage.bind(s.slack);
+    s.slack.postMessage = (args) =>
+      args.threadTs && /Should one/.test(args.text)
+        ? Promise.reject(new Error('invalid_blocks'))
+        : original(args);
+
+    await reviewed(s);
+
+    expect(s.slack.of('postMessage').some((m) => /Nit one/.test(String(m['text'])))).toBe(true);
+  });
+});
+
 describe('several PRs in one message', () => {
   const twoLinks = () => message({ text: `please review ${URL} and https://github.com/acme/api/pull/8` });
 
@@ -987,6 +1034,97 @@ describe('handleAction', () => {
 
     expect((await s.store.get(idOf(reviewId)))?.status).toBe('posted');
     expect(s.slack.of('postEphemeral')).toEqual([]);
+  });
+});
+
+describe('posting a selection of findings', () => {
+  const mustFix = finding({
+    id: 'M1',
+    severity: 'must_fix',
+    verification: 'confirmed',
+    line: 2,
+    title: 'Bad',
+  });
+  const should = finding({ id: 'S1', line: 2, title: 'Good' });
+  const nit = finding({ id: 'N1', severity: 'nit', line: 2, title: 'Tiny' });
+  const press = (
+    s: Awaited<ReturnType<typeof setup>>,
+    actionId: string,
+    value: string,
+    picks: readonly number[],
+  ) => s.service.handleAction({ actionId, value, userId: OWNER, picks: new Map([[0, picks]]) });
+  const payload = (s: Awaited<ReturnType<typeof setup>>) =>
+    JSON.parse(s.apiCalls()[0]?.opts?.input ?? '{}') as {
+      event: string;
+      body: string;
+      comments: { body: string }[];
+    };
+
+  it('approves once the owner unchecks the must_fix, and leaves it out of the review', async () => {
+    const s = await setup({ findings: [mustFix, should] });
+    const value = await reviewed(s);
+
+    await press(s, ACTIONS.postSelectedApprove, value, [1]);
+
+    const sent = payload(s);
+    expect(sent.event).toBe('APPROVE');
+    expect(sent.comments.map((c) => c.body)).toEqual([expect.stringContaining('Good')]);
+    expect(JSON.stringify(sent)).not.toContain('Bad');
+    expect(String(s.slack.of('updateMessage')[0]?.['text'])).toContain('1 of 2 findings');
+  });
+
+  it('refuses to approve while a must_fix is still checked', async () => {
+    const s = await setup({ findings: [mustFix, should] });
+    const value = await reviewed(s);
+
+    await press(s, ACTIONS.postSelectedApprove, value, [0, 1]);
+
+    expect(s.apiCalls()).toHaveLength(0);
+    expect(String(s.slack.of('postEphemeral')[0]?.['text'])).toMatch(/must-fix/i);
+    expect((await s.store.get(idOf(value)))?.status).toBe('notified');
+  });
+
+  it('posts checked nits as comments without approving', async () => {
+    const s = await setup({ findings: [should, nit] });
+    const value = await reviewed(s);
+
+    await press(s, ACTIONS.postCommentsOnly, value, [1]);
+
+    const sent = payload(s);
+    expect(sent.event).toBe('COMMENT');
+    expect(sent.comments.map((c) => c.body)).toEqual([expect.stringContaining('Tiny')]);
+  });
+
+  it('refuses to post comments when nothing is checked', async () => {
+    const s = await setup({ findings: [should] });
+    const value = await reviewed(s);
+
+    await press(s, ACTIONS.postCommentsOnly, value, []);
+
+    expect(s.apiCalls()).toHaveLength(0);
+    expect(String(s.slack.of('postEphemeral')[0]?.['text'])).toMatch(/nothing is checked/);
+  });
+
+  it('approves without comments when everything is unchecked', async () => {
+    const s = await setup({ findings: [should] });
+    const value = await reviewed(s);
+
+    await press(s, ACTIONS.postSelectedApprove, value, []);
+
+    const sent = payload(s);
+    expect(sent.event).toBe('APPROVE');
+    expect(sent.comments).toEqual([]);
+    expect(sent.body).toMatch(/^LGTM!! :\+1:\n\n<!--/);
+  });
+
+  it('refuses to approve your own PR', async () => {
+    const s = await setup({ findings: [should], pr: { author: 'me' } });
+    const value = await reviewed(s);
+
+    await press(s, ACTIONS.postSelectedApprove, value, [0]);
+
+    expect(s.apiCalls()).toHaveLength(0);
+    expect(String(s.slack.of('postEphemeral')[0]?.['text'])).toMatch(/own PR/);
   });
 });
 

@@ -47,6 +47,73 @@ export function classify(findings: readonly Finding[]): Classified {
   };
 }
 
+export type FindingGroup = 'postable' | 'uncertain' | 'nit';
+
+export interface NumberedFinding {
+  /** 1-based number shown in Slack, shared by the notification and its thread. */
+  readonly n: number;
+  /** Position in the review's original `findings` array; stable across restarts. */
+  readonly index: number;
+  readonly finding: Finding;
+  readonly group: FindingGroup;
+}
+
+/** Every finding the owner may want to read or post, in display order. Refuted ones are left out. */
+export function numberFindings(findings: readonly Finding[]): NumberedFinding[] {
+  const c = classify(findings);
+  const groups: readonly (readonly [FindingGroup, readonly Finding[]])[] = [
+    ['postable', c.postable],
+    ['uncertain', c.uncertain],
+    ['nit', c.nits],
+  ];
+  return groups
+    .flatMap(([group, list]) => list.map((f) => ({ group, finding: f, index: findings.indexOf(f) })))
+    .map((x, i) => ({ ...x, n: i + 1 }));
+}
+
+/** Slack allows ten options per checkbox group; four groups keep a notification well under its 50 blocks. */
+export const PICK_GROUP_SIZE = 10;
+export const MAX_PICK_GROUPS = 4;
+
+/** Checked finding indices per checkbox group, as read back from Slack. Untrusted. */
+export type Picks = ReadonlyMap<number, readonly number[]>;
+
+/** The findings offered as checkboxes, grouped as they appear in the notification. */
+export function pickGroups(findings: readonly Finding[]): NumberedFinding[][] {
+  const pickable = numberFindings(findings).slice(0, PICK_GROUP_SIZE * MAX_PICK_GROUPS);
+  return Array.from({ length: Math.ceil(pickable.length / PICK_GROUP_SIZE) }, (_, g) =>
+    pickable.slice(g * PICK_GROUP_SIZE, (g + 1) * PICK_GROUP_SIZE),
+  );
+}
+
+/**
+ * What to post, given the owner's checkboxes. Without picks (an older notification) this is exactly
+ * `classify`. A group the owner never touched keeps its default, which is what `classify` would post;
+ * an index is honoured only inside the group it was offered in, so nothing else can be smuggled in.
+ * A checked uncertain must_fix counts as a must_fix; one left unchecked still blocks approval,
+ * because nobody has ruled it out.
+ */
+export function selectFindings(findings: readonly Finding[], picks: Picks | undefined): Classified {
+  const base = classify(findings);
+  if (!picks) return base;
+  const selected = numberFindings(findings)
+    .filter(({ n, index, group }) => {
+      const g = Math.floor((n - 1) / PICK_GROUP_SIZE);
+      const picked = g < MAX_PICK_GROUPS ? picks.get(g) : undefined;
+      return picked ? picked.includes(index) : group === 'postable';
+    })
+    .map((x) => x.finding);
+  const unselected = (list: readonly Finding[]) => list.filter((f) => !selected.includes(f));
+  return {
+    postable: selected,
+    uncertain: unselected(base.uncertain),
+    nits: unselected(base.nits),
+    refuted: base.refuted,
+    hasMustFix: selected.some((f) => f.severity === 'must_fix'),
+    hasUnresolvedMustFix: unselected(base.uncertain).some((f) => f.severity === 'must_fix'),
+  };
+}
+
 export type ApproveBlocker = 'must_fix' | 'unresolved' | 'own_pr' | 'comments_only';
 
 export function decideEvent(
