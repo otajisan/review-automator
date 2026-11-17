@@ -1105,6 +1105,17 @@ describe('posting a selection of findings', () => {
     expect(String(s.slack.of('postEphemeral')[0]?.['text'])).toMatch(/nothing is checked/);
   });
 
+  it('refuses to post comments when Slack sent no checkboxes and nothing would be posted', async () => {
+    const s = await setup({ findings: [nit] });
+    const value = await reviewed(s);
+
+    await s.service.handleAction({ actionId: ACTIONS.postCommentsOnly, value, userId: OWNER });
+
+    expect(s.apiCalls()).toHaveLength(0);
+    expect(String(s.slack.of('postEphemeral')[0]?.['text'])).toMatch(/nothing is checked/);
+    expect((await s.store.get(idOf(value)))?.status).toBe('notified');
+  });
+
   it('approves without comments when everything is unchecked', async () => {
     const s = await setup({ findings: [should] });
     const value = await reviewed(s);

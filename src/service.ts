@@ -721,7 +721,9 @@ export function createService(deps: ServiceDeps): Service {
       });
       return blocker ? APPROVAL_REFUSED[blocker] : undefined;
     }
-    if (choice.picks && classified.postable.length === 0) {
+    // Slack may leave untouched checkboxes out of the payload, so the picks can be missing even
+    // from a new notification: refuse an empty comment review either way.
+    if ((choice.picks || choice.mode === 'comments_only') && classified.postable.length === 0) {
       return 'nothing is checked. Check the findings to post, or use *Dismiss*.';
     }
     return undefined;
