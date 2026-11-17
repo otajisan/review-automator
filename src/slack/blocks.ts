@@ -278,7 +278,9 @@ export function resolvedBlocks(rec: ReviewRecord, outcome: string): KnownBlock[]
   return [
     section(`${outcome} ${prLink(rec)}`),
     ...(rec.result?.summary ? [context(escapeMrkdwn(rec.result.summary))] : []),
-    ...((rec.result?.findings.length ?? 0) > 0 ? [context('🧵 The findings stay in the thread.')] : []),
+    ...((rec.result?.findings.length ?? 0) > 0
+      ? [context('🧵 The full findings, if they could be posted, are in the thread.')]
+      : []),
   ];
 }
 
