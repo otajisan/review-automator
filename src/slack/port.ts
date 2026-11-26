@@ -13,4 +13,6 @@ export interface SlackPort {
   addReaction(args: { channel: string; ts: string; name: string }): Promise<void>;
   removeReaction(args: { channel: string; ts: string; name: string }): Promise<void>;
   permalink(args: { channel: string; ts: string }): Promise<string | undefined>;
+  /** Text of the message that started a thread, e.g. the PR link a mention replies to. */
+  threadParentText(args: { channel: string; threadTs: string }): Promise<string | undefined>;
 }

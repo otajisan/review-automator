@@ -28,6 +28,8 @@ export interface ReviewRecord {
   readonly pr: PrRef & { readonly url: string; readonly title: string; readonly author: string };
   readonly requestedBy: string;
   readonly source: SlackLocation;
+  /** Requested by mentioning the bot: skips the draft / approved / already-reviewed checks. */
+  readonly forced?: boolean;
   readonly status: ReviewStatus;
   /** Head commit the review was started for; dedupe key together with the PR. */
   readonly requestedHeadSha: string;

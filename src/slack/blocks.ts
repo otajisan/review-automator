@@ -129,7 +129,8 @@ const THREAD_NOTE = '🧵 The full text of every finding is in the thread, numbe
 
 /** Text for the "started reviewing" message: `{pr}` in the template becomes a link to the PR. */
 export function startedText(rec: ReviewRecord, template: string): string {
-  return template.split('{pr}').join(prLink(rec));
+  const text = template.split('{pr}').join(prLink(rec));
+  return rec.forced ? `${text} (forced)` : text;
 }
 
 export function notificationText(rec: ReviewRecord, ownerUserId: string): string {

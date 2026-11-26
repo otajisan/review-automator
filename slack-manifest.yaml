@@ -9,6 +9,7 @@ features:
 oauth_config:
   scopes:
     bot:
+      - app_mentions:read # "@review-automator <PR link>" forces a review
       - channels:history # read PR links in public channels you invite the bot to
       - groups:history # ...and in private channels
       - chat:write # post summaries, thread replies, ephemeral messages
@@ -16,6 +17,7 @@ oauth_config:
 settings:
   event_subscriptions:
     bot_events:
+      - app_mention
       - message.channels
       - message.groups
   interactivity:

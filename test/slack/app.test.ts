@@ -107,3 +107,37 @@ describe('webClientPort', () => {
     await expect(webClientPort(c as never).postMessage({ channel: 'C', text: 't' })).rejects.toThrow(/no ts/);
   });
 });
+
+describe('toIncomingMessage for mentions and threads', () => {
+  it('keeps the thread ts', () => {
+    expect(toIncomingMessage({ channel: 'C1', ts: '1.2', thread_ts: '1.1' })).toEqual({
+      channel: 'C1',
+      ts: '1.2',
+      threadTs: '1.1',
+    });
+  });
+
+  it('flags a message that mentions the bot', () => {
+    expect(toIncomingMessage({ channel: 'C1', ts: '1.2', text: 'hey <@UBOT1> look' }, 'UBOT1')).toEqual({
+      channel: 'C1',
+      ts: '1.2',
+      text: 'hey <@UBOT1> look',
+      mentionsBot: true,
+    });
+    expect(toIncomingMessage({ channel: 'C1', ts: '1.2', text: 'hey <@UOTHER> look' }, 'UBOT1')).toEqual({
+      channel: 'C1',
+      ts: '1.2',
+      text: 'hey <@UOTHER> look',
+    });
+  });
+});
+
+describe('webClientPort.threadParentText', () => {
+  it('reads the first message of the thread', async () => {
+    const replies = vi.fn(() => Promise.resolve({ ok: true, messages: [{ text: 'parent' }, { text: 'r' }] }));
+    const port = webClientPort({ conversations: { replies } } as never);
+
+    expect(await port.threadParentText({ channel: 'C', threadTs: '1.1' })).toBe('parent');
+    expect(replies).toHaveBeenCalledWith({ channel: 'C', ts: '1.1', limit: 1, inclusive: true });
+  });
+});

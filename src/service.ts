@@ -77,6 +77,9 @@ export interface IncomingMessage {
   readonly text?: string;
   readonly subtype?: string;
   readonly botId?: string;
+  readonly threadTs?: string;
+  /** The message mentions the bot; such messages are handled by `handleMention` only. */
+  readonly mentionsBot?: boolean;
 }
 
 export interface IncomingAction {
@@ -91,6 +94,8 @@ export interface IncomingAction {
 
 export interface Service {
   handleMessage(msg: IncomingMessage): Promise<void>;
+  /** "@review-automator <PR link>": reviews the PR even if it would normally be skipped. */
+  handleMention(msg: IncomingMessage): Promise<void>;
   handleAction(action: IncomingAction): Promise<void>;
   /** Re-queues reviews left unfinished by a crash or restart. */
   resumeInterrupted(): Promise<void>;
@@ -103,6 +108,8 @@ export interface Service {
 const REACTION = { working: 'eyes', done: 'white_check_mark', failed: 'x' } as const;
 /** Statuses of a record whose result is (or was) in front of the owner. */
 const LIVE_RESULT = new Set<ReviewRecord['status']>(['notified', 'posting', 'posted']);
+/** A forced review does not start next to these: the same head is being reviewed or posted right now. */
+const IN_PROGRESS = new Set<ReviewRecord['status']>(['queued', 'running', 'posting']);
 const MAX_ERROR_CHARS = 500;
 /** Ignore patterns only look at the start of a message; announcements are short. */
 const MAX_PATTERN_INPUT = 4000;
@@ -162,6 +169,30 @@ function findingCounts(rec: ReviewRecord, classified: Classified): PostedCounts 
   return total > 0 ? { posted: classified.postable.length, total } : undefined;
 }
 
+/** What happened to one PR link of a request. */
+type LinkResult = { readonly ref: PrRef } & (
+  | { readonly kind: 'started' | 'not_allowed' | 'failed' }
+  | { readonly kind: 'skipped'; readonly reason: string }
+  | { readonly kind: 'not_started'; readonly status: ReviewRecord['status'] }
+);
+
+/** One line of the private reply to a forced review request. */
+function linkResultText(result: LinkResult, notifyChannel: string): string {
+  const pr = `<${prUrl(result.ref)}|${escapeMrkdwn(prSlug(result.ref))}>`;
+  switch (result.kind) {
+    case 'started':
+      return `:mag: Reviewing ${pr} (forced). The result will be in <#${notifyChannel}>.`;
+    case 'not_started':
+      return `:hourglass_flowing_sand: ${pr} is already being reviewed or posted (status: ${result.status}).`;
+    case 'skipped':
+      return `:information_source: Not reviewing ${pr}: ${escapeMrkdwn(result.reason)}.`;
+    case 'not_allowed':
+      return `:no_entry: Not reviewing ${pr}: the repository is not in allowed_repos.`;
+    case 'failed':
+      return `:x: Could not start a review of ${pr}; see <#${notifyChannel}>.`;
+  }
+}
+
 export function createService(deps: ServiceDeps): Service {
   const { config, slack, gh, store, logger } = deps;
   const queue = new PQueue({ concurrency: config.review.concurrency });
@@ -200,9 +231,29 @@ export function createService(deps: ServiceDeps): Service {
     return ignorePatterns.some((re) => re.test(withoutLinks));
   }
 
-  /** Why a linked PR should not be reviewed, or null if it should. */
-  async function skipReason(pr: PrInfo): Promise<string | null> {
+  /** Who may force a review: the owner, and allowed_requesters (anyone when that list is empty). */
+  function canForce(user: string): boolean {
+    const allowed = config.slack.allowed_requesters;
+    return user === config.owner.slack_user_id || allowed.length === 0 || allowed.includes(user);
+  }
+
+  /** PR links in a mention, or else in the message whose thread the mention is in. */
+  async function mentionedPrs(msg: IncomingMessage): Promise<PrRef[]> {
+    const own = extractPrRefs(msg.text ?? '');
+    if (own.length > 0 || !msg.threadTs || msg.threadTs === msg.ts) return own;
+    const parent = await slack
+      .threadParentText({ channel: msg.channel, threadTs: msg.threadTs })
+      .catch((err: unknown) => {
+        logger.warn({ err: errorMessage(err) }, 'could not read the thread of a mention');
+        return undefined;
+      });
+    return extractPrRefs(parent ?? '');
+  }
+
+  /** Why a linked PR should not be reviewed, or null if it should. Forced: only closed PRs are skipped. */
+  async function skipReason(pr: PrInfo, force = false): Promise<string | null> {
     if (pr.state !== 'OPEN') return `PR is ${pr.state.toLowerCase()}`;
+    if (force) return null;
     if (config.github.skip_drafts && pr.isDraft) return 'PR is a draft';
     if (config.github.skip_approved_by_owner) {
       try {
@@ -276,27 +327,44 @@ export function createService(deps: ServiceDeps): Service {
     });
   }
 
-  /** Starts a review for every eligible PR linked in one message; reactions settle once at the end. */
-  async function startLinkedReviews(text: string, user: string, source: SlackLocation): Promise<void> {
+  /**
+   * Starts a review for every eligible PR linked in one message; reactions settle once at the end.
+   * Returns what happened to each link, for telling the requester of a forced review.
+   */
+  async function startLinkedReviews(
+    refs: readonly PrRef[],
+    user: string,
+    source: SlackLocation,
+    force = false,
+  ): Promise<LinkResult[]> {
     sourceProgress.set(sourceKey(source), { ...IDLE, reading: true });
     let linkFailed = false;
+    const results: LinkResult[] = [];
     try {
-      for (const ref of extractPrRefs(text)) {
+      for (const ref of refs) {
         if (!isRepoAllowed(ref, config.github.allowed_repos)) {
           logger.debug({ pr: prSlug(ref) }, 'repository not in allowed_repos; ignoring');
+          results.push({ ref, kind: 'not_allowed' });
           continue;
         }
         try {
           const pr = await fetchPr(gh, ref);
-          const skip = await skipReason(pr);
+          const skip = await skipReason(pr, force);
           if (skip) {
             logger.info({ pr: prSlug(ref), reason: skip }, 'not reviewing this PR');
+            results.push({ ref, kind: 'skipped', reason: skip });
             continue;
           }
-          await startReview(pr, user, source);
+          const started = await startReview(pr, user, source, force);
+          results.push(
+            started.started
+              ? { ref, kind: 'started' }
+              : { ref, kind: 'not_started', status: started.existing.status },
+          );
         } catch (err) {
           logger.warn({ pr: prSlug(ref), err: errorMessage(err) }, 'could not start review');
           linkFailed = true;
+          results.push({ ref, kind: 'failed' });
           // With reactions off this is the only trace of the request, so tell the owner.
           await slack
             .postMessage({
@@ -310,6 +378,7 @@ export function createService(deps: ServiceDeps): Service {
       const state = sourceProgress.get(sourceKey(source)) ?? IDLE;
       await settle(source, { ...state, reading: false, failed: state.failed || linkFailed });
     }
+    return results;
   }
 
   /** Slack hiccups must never fail a review, so reactions are best effort. */
@@ -326,17 +395,32 @@ export function createService(deps: ServiceDeps): Service {
   type StartResult =
     { readonly started: true } | { readonly started: false; readonly existing: ReviewRecord };
 
-  async function startReview(pr: PrInfo, requestedBy: string, source: SlackLocation): Promise<StartResult> {
+  async function startReview(
+    pr: PrInfo,
+    requestedBy: string,
+    source: SlackLocation,
+    force = false,
+  ): Promise<StartResult> {
     // Bolt handles events concurrently; without the lock the same PR posted twice at once is reviewed twice.
-    return withPrLock(prSlug(pr).toLowerCase(), () => startReviewLocked(pr, requestedBy, source));
+    return withPrLock(prSlug(pr).toLowerCase(), () => startReviewLocked(pr, requestedBy, source, force));
+  }
+
+  /** The review that stops a new one for this head: any live one, or (forced) one still in progress. */
+  async function blockingReview(pr: PrInfo, force: boolean): Promise<ReviewRecord | undefined> {
+    if (!force) return store.findForHead(pr, pr.headSha);
+    const records = await store.listForPr(pr);
+    return records.find(
+      (r) => (r.requestedHeadSha === pr.headSha || r.headSha === pr.headSha) && IN_PROGRESS.has(r.status),
+    );
   }
 
   async function startReviewLocked(
     pr: PrInfo,
     requestedBy: string,
     source: SlackLocation,
+    force: boolean,
   ): Promise<StartResult> {
-    const existing = await store.findForHead(pr, pr.headSha);
+    const existing = await blockingReview(pr, force);
     if (existing) {
       logger.info({ pr: prSlug(pr), reviewId: existing.id }, 'this head was already reviewed; skipping');
       return { started: false, existing };
@@ -353,6 +437,7 @@ export function createService(deps: ServiceDeps): Service {
       requestedBy,
       source,
       requestedHeadSha: pr.headSha,
+      ...(force ? { forced: true } : {}),
     });
     await sourceStarted(source);
     void queue.add(() => processReview(rec.id, pr));
@@ -460,7 +545,7 @@ export function createService(deps: ServiceDeps): Service {
         if (knownPr) return knownPr;
         throw err;
       });
-      const skip = await skipReason(pr);
+      const skip = await skipReason(pr, rec.forced === true);
       if (skip) {
         const skipped = await store.update(reviewId, { status: 'skipped', error: `skipped: ${skip}` });
         // Resumed after a restart, a review may already have announced itself: close that thread.
@@ -482,9 +567,12 @@ export function createService(deps: ServiceDeps): Service {
       // the same commit. Under the PR lock, only the first to finish notifies.
       const { superseded, notified } = await withPrLock(prSlug(rec.pr).toLowerCase(), async () => {
         const others = await store.listForPr(rec.pr);
-        const earlier = others.find(
-          (r) => r.id !== reviewId && r.headSha === outcome.headSha && LIVE_RESULT.has(r.status),
-        );
+        // A forced review is wanted even for a reviewed commit; it replaces the earlier results instead.
+        const earlier = rec.forced
+          ? undefined
+          : others.find(
+              (r) => r.id !== reviewId && r.headSha === outcome.headSha && LIVE_RESULT.has(r.status),
+            );
         if (earlier) {
           await store.update(reviewId, {
             status: 'dismissed',
@@ -494,6 +582,12 @@ export function createService(deps: ServiceDeps): Service {
         }
         const notification = await notify(reviewed, outcome);
         const done = await store.update(reviewId, { status: 'notified', notification });
+        // Only once the new notification exists, and only for this commit: a newer head's result stays.
+        if (rec.forced) {
+          await retireEarlier(others.filter((r) => r.id !== reviewId && r.headSha === outcome.headSha)).catch(
+            (err: unknown) => log.warn({ err: errorMessage(err) }, 'could not close earlier notifications'),
+          );
+        }
         return { superseded: undefined, notified: done };
       });
       if (superseded) {
@@ -526,6 +620,17 @@ export function createService(deps: ServiceDeps): Service {
       await sourceFinished(rec.source, 'failed');
       // Reported in the owner's notify channel, not in the channel where the PR was shared.
       await threadNote(reviewId, `:x: Review failed:\n${slackError(message)}`);
+    }
+  }
+
+  /** Closes earlier notifications of the PR, so their buttons cannot post next to the forced review. */
+  async function retireEarlier(records: readonly ReviewRecord[]): Promise<void> {
+    for (const r of records) {
+      const done = await store.transition(r.id, ['notified'], 'dismissed');
+      if (!done) continue;
+      await resolveMessage(done, '🔁 Superseded by a forced re-review of').catch((err: unknown) =>
+        logger.warn({ reviewId: r.id, err: errorMessage(err) }, 'could not update the Slack message'),
+      );
     }
   }
 
@@ -781,6 +886,8 @@ export function createService(deps: ServiceDeps): Service {
     async handleMessage(msg) {
       if (!config.slack.watch_channels.includes(msg.channel)) return;
       if (!HANDLED_SUBTYPES.has(msg.subtype) || msg.botId || !msg.user || !msg.text) return;
+      // A mention is a forced request; handleMention takes it, so it is not started twice.
+      if (msg.mentionsBot) return;
       // Cheap checks on the poster come before running operator-supplied regular expressions.
       if (config.slack.ignored_requesters.includes(msg.user)) {
         logger.debug({ user: msg.user }, 'poster is in ignored_requesters; ignoring');
@@ -795,7 +902,33 @@ export function createService(deps: ServiceDeps): Service {
         );
         return;
       }
-      await startLinkedReviews(msg.text, msg.user, { channel: msg.channel, ts: msg.ts });
+      await startLinkedReviews(extractPrRefs(msg.text), msg.user, { channel: msg.channel, ts: msg.ts });
+    },
+
+    async handleMention(msg) {
+      const { slack: slackConfig } = config;
+      const channels = [...slackConfig.watch_channels, slackConfig.notify_channel];
+      if (!channels.includes(msg.channel) || msg.botId || !msg.user) return;
+      const user = msg.user;
+      const reply = (text: string): Promise<void> =>
+        slack
+          .postEphemeral({ channel: msg.channel, user, text })
+          .catch((err: unknown) => logger.warn({ err: errorMessage(err) }, 'could not reply to a mention'));
+      if (!canForce(user)) {
+        logger.info({ user }, 'forced review refused: not the owner or an allowed requester');
+        await reply(`Only <@${config.owner.slack_user_id}> or allowed requesters can ask me for a review.`);
+        return;
+      }
+      const refs = await mentionedPrs(msg);
+      if (refs.length === 0) {
+        await reply(
+          'No PR link found. Mention me with a PR link, or in the thread of a message that has one.',
+        );
+        return;
+      }
+      logger.info({ user, prs: refs.map(prSlug) }, 'forced review requested');
+      const results = await startLinkedReviews(refs, user, { channel: msg.channel, ts: msg.ts }, true);
+      await reply(results.map((r) => linkResultText(r, slackConfig.notify_channel)).join('\n'));
     },
 
     async handleAction(action) {

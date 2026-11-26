@@ -37,6 +37,11 @@ export function webClientPort(client: webApi.WebClient): SlackPort {
       const res = await client.chat.getPermalink({ channel, message_ts: ts });
       return res.permalink;
     },
+    async threadParentText({ channel, threadTs }) {
+      // The first message returned for a thread is its parent.
+      const res = await client.conversations.replies({ channel, ts: threadTs, limit: 1, inclusive: true });
+      return res.messages?.[0]?.text;
+    },
   };
 }
 
@@ -44,8 +49,11 @@ function str(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined;
 }
 
-/** Message events are a wide union in Bolt's types; we only need a few string fields. */
-export function toIncomingMessage(raw: unknown): IncomingMessage | undefined {
+/**
+ * Message events are a wide union in Bolt's types; we only need a few string fields.
+ * With `botUserId`, a message that mentions the bot is flagged: the mention handler owns it.
+ */
+export function toIncomingMessage(raw: unknown, botUserId?: string): IncomingMessage | undefined {
   if (typeof raw !== 'object' || raw === null) return undefined;
   const m = raw as Record<string, unknown>;
   const channel = str(m['channel']);
@@ -56,11 +64,14 @@ export function toIncomingMessage(raw: unknown): IncomingMessage | undefined {
     text: str(m['text']),
     subtype: str(m['subtype']),
     botId: str(m['bot_id']),
+    threadTs: str(m['thread_ts']),
   };
+  const mentionsBot = botUserId !== undefined && (optional.text?.includes(`<@${botUserId}>`) ?? false);
   return {
     channel,
     ts,
     ...Object.fromEntries(Object.entries(optional).filter(([, v]) => v !== undefined)),
+    ...(mentionsBot ? { mentionsBot } : {}),
   };
 }
 
@@ -122,14 +133,25 @@ export function createSlackApp(opts: {
   });
   const log = opts.logger.child({ component: 'slack' });
 
-  app.message(({ message }) => {
-    const incoming = toIncomingMessage(message);
+  app.message(({ message, context }) => {
+    const incoming = toIncomingMessage(message, context.botUserId);
     if (!incoming) return Promise.resolve();
     // Do not hold the Socket Mode ack; a review takes minutes and is queued anyway.
     void opts
       .service()
       .handleMessage(incoming)
       .catch((err: unknown) => log.error({ err: errorMessage(err) }, 'message handler failed'));
+    return Promise.resolve();
+  });
+
+  // "@review-automator <PR link>": review it even if it would normally be skipped.
+  app.event('app_mention', ({ event }) => {
+    const incoming = toIncomingMessage(event);
+    if (!incoming) return Promise.resolve();
+    void opts
+      .service()
+      .handleMention(incoming)
+      .catch((err: unknown) => log.error({ err: errorMessage(err) }, 'mention handler failed'));
     return Promise.resolve();
   });
 

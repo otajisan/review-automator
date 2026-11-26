@@ -1220,3 +1220,258 @@ describe('resumeInterrupted', () => {
     expect((await s.store.get(rec.id))?.status).toBe('notified');
   });
 });
+
+describe('handleMention (forced review)', () => {
+  const mention = (overrides = {}) => ({
+    channel: 'C0WATCH01',
+    ts: '500.1',
+    user: OWNER,
+    text: `<@U0BOT0001> ${URL}`,
+    ...overrides,
+  });
+  const ephemerals = (s: Awaited<ReturnType<typeof setup>>) =>
+    s.slack.of('postEphemeral').map((e) => String(e['text']));
+
+  it('reviews a draft PR', async () => {
+    const s = await setup({ pr: { isDraft: true } });
+
+    await s.service.handleMention(mention());
+    await s.service.idle();
+
+    expect(s.review).toHaveBeenCalledTimes(1);
+  });
+
+  it('reviews a PR whose current head the owner already approved', async () => {
+    const s = await setup();
+    s.world.existingReviews = [
+      JSON.stringify({ user: 'me', state: 'APPROVED', commit_id: HEAD_SHA, html_url: 'x', body: '' }),
+    ];
+
+    await s.service.handleMention(mention());
+    await s.service.idle();
+
+    expect(s.review).toHaveBeenCalledTimes(1);
+  });
+
+  it('reviews an already reviewed head again and retires the earlier notification', async () => {
+    const s = await setup();
+    const oldValue = await reviewed(s);
+    const oldNotification = (await s.store.get(idOf(oldValue)))?.notification;
+
+    await s.service.handleMention(mention());
+    await s.service.idle();
+
+    expect(s.review).toHaveBeenCalledTimes(2);
+    const old = await s.store.get(idOf(oldValue));
+    expect(old?.status).toBe('dismissed');
+    const retired = s.slack.of('updateMessage').find((u) => u['ts'] === oldNotification?.ts);
+    expect(String(retired?.['text'])).toMatch(/Superseded by a forced re-review/);
+    const records = await s.store.listForPr({ owner: 'acme', repo: 'api', number: 7 });
+    const forced = records.find((r) => r.forced);
+    expect(forced?.status).toBe('notified');
+  });
+
+  it('keeps the earlier notification when the forced one cannot be posted', async () => {
+    const s = await setup();
+    const oldValue = await reviewed(s);
+    const postMessage = s.slack.postMessage.bind(s.slack);
+    s.slack.postMessage = (args) =>
+      args.blocks ? Promise.reject(new Error('slack down')) : postMessage(args);
+
+    await s.service.handleMention(mention());
+    await s.service.idle();
+
+    expect((await s.store.get(idOf(oldValue)))?.status).toBe('notified');
+    expect(s.slack.of('updateMessage')).toEqual([]);
+  });
+
+  it('does not retire the notification of a newer head', async () => {
+    const s = await setup();
+    const newer = '9'.repeat(40);
+    const rec = await s.store.create({
+      pr: { owner: 'acme', repo: 'api', number: 7, url: URL, title: 't', author: 'alice' },
+      requestedBy: 'U0REQ0001',
+      source: { channel: 'C0WATCH01', ts: '1.1' },
+      requestedHeadSha: newer,
+    });
+    await s.store.update(rec.id, {
+      status: 'notified',
+      headSha: newer,
+      notification: { channel: 'C0NOTIFY1', ts: '77.7' },
+    });
+
+    await s.service.handleMention(mention());
+    await s.service.idle();
+
+    expect(s.review).toHaveBeenCalledTimes(1);
+    expect((await s.store.get(rec.id))?.status).toBe('notified');
+  });
+
+  it('marks the start message of a forced review', async () => {
+    const s = await setup();
+
+    await s.service.handleMention(mention());
+    await s.service.idle();
+
+    expect(String(s.slack.of('postMessage')[0]?.['text'])).toMatch(/\(forced\)$/);
+  });
+
+  it('works for the owner even when listed in ignored_requesters, and despite ignore patterns', async () => {
+    const s = await setup({
+      configYaml: `slack: { ignored_requesters: [${OWNER}], ignore_message_patterns: ['release'] }`,
+    });
+
+    await s.service.handleMention(mention({ text: `<@U0BOT0001> release ${URL}` }));
+    await s.service.idle();
+
+    expect(s.review).toHaveBeenCalledTimes(1);
+  });
+
+  it('lets allowed_requesters force a review', async () => {
+    const s = await setup({ configYaml: 'slack: { allowed_requesters: [U0TEAM001] }' });
+
+    await s.service.handleMention(mention({ user: 'U0TEAM001' }));
+    await s.service.idle();
+
+    expect(s.review).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses someone outside allowed_requesters, privately', async () => {
+    const s = await setup({ configYaml: 'slack: { allowed_requesters: [U0TEAM001] }' });
+
+    await s.service.handleMention(mention({ user: 'U0STRANGE' }));
+    await s.service.idle();
+
+    expect(s.review).not.toHaveBeenCalled();
+    expect(s.slack.of('postEphemeral')).toEqual([
+      expect.objectContaining({ channel: 'C0WATCH01', user: 'U0STRANGE' }),
+    ]);
+  });
+
+  it('confirms privately to the requester and posts nothing in the channel', async () => {
+    const s = await setup();
+
+    await s.service.handleMention(mention());
+    await s.service.idle();
+
+    expect(ephemerals(s).join('\n')).toMatch(/Reviewing <https:\/\/github\.com\/acme\/api\/pull\/7\|/);
+    expect(s.slack.of('postMessage').filter((m) => m['channel'] === 'C0WATCH01')).toEqual([]);
+  });
+
+  it('accepts a mention in the notify channel', async () => {
+    const s = await setup();
+
+    await s.service.handleMention(mention({ channel: 'C0NOTIFY1' }));
+    await s.service.idle();
+
+    expect(s.review).toHaveBeenCalledTimes(1);
+  });
+
+  it('ignores a mention in an unwatched channel', async () => {
+    const s = await setup();
+
+    await s.service.handleMention(mention({ channel: 'C0OTHER01' }));
+    await s.service.idle();
+
+    expect(s.review).not.toHaveBeenCalled();
+    expect(s.slack.of('postEphemeral')).toEqual([]);
+  });
+
+  it('does not review merged PRs or repositories outside allowed_repos, and says why', async () => {
+    const s = await setup();
+    s.world.mergedNumbers = [7];
+
+    await s.service.handleMention(
+      mention({ text: `<@U0BOT0001> ${URL} https://github.com/evil/repo/pull/1` }),
+    );
+    await s.service.idle();
+
+    expect(s.review).not.toHaveBeenCalled();
+    const text = ephemerals(s).join('\n');
+    expect(text).toMatch(/PR is merged/);
+    expect(text).toMatch(/allowed_repos/);
+  });
+
+  it('does not start a second review while one for the same head is running', async () => {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const s = await setup({
+      review: async (_ref, _id, o) => {
+        await gate;
+        return {
+          pr: o.pr,
+          headSha: o.pr.headSha,
+          baseSha: BASE_SHA,
+          result: { complete: true, summary: 'sum', findings: [] },
+          classified: classify([]),
+          costUsd: 0.1,
+          numTurns: 1,
+          permissionDenials: [],
+        };
+      },
+    });
+    await s.service.handleMessage(message());
+    await vi.waitFor(async () => {
+      const recs = await s.store.listForPr({ owner: 'acme', repo: 'api', number: 7 });
+      expect(recs[0]?.status).toBe('running');
+    });
+
+    await s.service.handleMention(mention());
+    release();
+    await s.service.idle();
+
+    const recs = await s.store.listForPr({ owner: 'acme', repo: 'api', number: 7 });
+    expect(recs).toHaveLength(1);
+    expect(ephemerals(s).join('\n')).toMatch(/already being reviewed/);
+  });
+
+  it('uses the PR link of the thread parent when the mention has none', async () => {
+    const s = await setup();
+    s.slack.threadParents['400.1'] = `please review ${URL}`;
+
+    await s.service.handleMention(mention({ text: '<@U0BOT0001> review this', threadTs: '400.1' }));
+    await s.service.idle();
+
+    expect(s.review).toHaveBeenCalledTimes(1);
+  });
+
+  it('says so when no PR link can be found', async () => {
+    const s = await setup();
+
+    await s.service.handleMention(mention({ text: '<@U0BOT0001> hello' }));
+    await s.service.idle();
+
+    expect(s.review).not.toHaveBeenCalled();
+    expect(ephemerals(s).join('\n')).toMatch(/No PR link/);
+  });
+
+  it('keeps a forced review forced when it is resumed after a restart', async () => {
+    const s = await setup({ pr: { isDraft: true } });
+    const rec = await s.store.create({
+      pr: { owner: 'acme', repo: 'api', number: 7, url: URL, title: 't', author: 'alice' },
+      requestedBy: OWNER,
+      source: { channel: 'C0WATCH01', ts: '1.1' },
+      requestedHeadSha: HEAD_SHA,
+      forced: true,
+    });
+    await s.store.update(rec.id, { status: 'running' });
+
+    await s.service.resumeInterrupted();
+    await s.service.idle();
+
+    expect((await s.store.get(rec.id))?.status).toBe('notified');
+  });
+});
+
+describe('handleMessage with a mention of the bot', () => {
+  it('leaves the message to the mention handler, so it is not reviewed twice', async () => {
+    const s = await setup();
+
+    await s.service.handleMessage(message({ mentionsBot: true }));
+    await s.service.idle();
+
+    expect(s.review).not.toHaveBeenCalled();
+  });
+});
